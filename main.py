@@ -18,12 +18,13 @@ async def place_trade(account_id, action, symbol, volume):
         await connection.connect()
         await connection.wait_synchronized()
         
+        # We use the fixed symbol here
         if action.lower() == "buy":
             result = await connection.create_market_buy_order(symbol, volume)
         else:
             result = await connection.create_market_sell_order(symbol, volume)
         
-        print(f"✅ Success for Account {account_id}")
+        print(f"✅ Success: {action} {symbol} for Account {account_id}")
     except Exception as e:
         print(f"❌ Error for Account {account_id}: {e}")
 
@@ -32,7 +33,15 @@ def webhook():
     data = request.json
     user = data.get("user_id")
     
-    # Decide which account to use
+    # --- SYMBOL FIXER FOR EXNESS ---
+    # 1. Take 'FX_IDC:EURUSD' -> 'EURUSD'
+    raw_symbol = data.get('symbol', 'EURUSD')
+    clean_symbol = raw_symbol.split(':')[-1] 
+    
+    # 2. Add 'm' for Exness Standard (Change 'm' to '' if not needed)
+    final_symbol = clean_symbol + "m"
+    # -------------------------------
+
     target_id = None
     if user == "ME":
         target_id = MY_ACC_ID
@@ -40,8 +49,14 @@ def webhook():
         target_id = FRIEND_ACC_ID
     
     if target_id:
-        asyncio.run(place_trade(target_id, data['action'], data['symbol'], float(data['volume'])))
-        return {"status": "Trade Sent"}, 200
+        asyncio.run(place_trade(
+            target_id, 
+            data['action'], 
+            final_symbol, 
+            float(data.get('volume', 0.01))
+        ))
+        return {"status": f"Trade {final_symbol} Sent"}, 200
+    
     return {"status": "Account Not Ready"}, 400
 
 if __name__ == "__main__":
