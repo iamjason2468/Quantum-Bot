@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 TOKEN = os.getenv('META_API_TOKEN')
 MY_ACC_ID = os.getenv('MY_ACCOUNT_ID')
-FRIEND_ACC_ID = os.getenv('FRIEND_ACC_ID')
+FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 
 # Validate required environment variables
 if not TOKEN:
@@ -124,8 +124,7 @@ def ping():
     logger.info("🏓 Ping received")
     return jsonify({
         "status": "ok", 
-        "message": "Railway server is running",
-        "timestamp": str(asyncio.get_event_loop().time())
+        "message": "Railway server is running"
     }), 200
 
 @app.route('/test-webhook', methods=['POST'])
