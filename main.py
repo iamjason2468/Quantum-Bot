@@ -57,9 +57,9 @@ async def fetch_account_balance(account_id):
             await account.deploy()
             await account.wait_connected()
         
-        connection = account.get_streaming_connection()
+        # FIXED: Use get_rpc_connection() for account info
+        connection = account.get_rpc_connection()
         await connection.connect()
-        await connection.wait_synchronized()
         account_info = await connection.get_account_information()
         balance = account_info.get('balance', 0.0)
         logger.info(f"📊 Account {account_id} balance: ${balance:.2f}")
@@ -83,8 +83,11 @@ async def place_trade(account_id, action, symbol, volume, use_adaptive=True):
             await account.deploy()
             await account.wait_connected()
         
-        connection = account.get_streaming_connection()
+        # FIXED: Use get_rpc_connection() instead of get_streaming_connection()
+        connection = account.get_rpc_connection()
         await connection.connect()
+
+        # Wait for synchronization
         await connection.wait_synchronized()
 
         final_volume = volume
@@ -96,10 +99,10 @@ async def place_trade(account_id, action, symbol, volume, use_adaptive=True):
             else:
                 logger.warning("⚠️ Using fallback volume from webhook.")
 
-        # Get symbol specification
-        spec = await connection.get_symbol_specification(symbol)
-        if not spec:
-            logger.error(f"❌ Symbol {symbol} not found on account {account_id}")
+        # FIXED: Use get_symbols() to check symbol availability
+        symbols = await connection.get_symbols()
+        if symbol not in symbols:
+            logger.error(f"❌ Symbol {symbol} not found. Available: {list(symbols.keys())[:5]}...")
             return {"error": f"Symbol {symbol} not found"}
 
         # Place the order
@@ -116,27 +119,22 @@ async def place_trade(account_id, action, symbol, volume, use_adaptive=True):
         return {"error": str(e)}
 
 # ------------------------------------------------------------------
-# HEALTH CHECK ENDPOINTS (for connectivity testing)
+# HEALTH CHECK ENDPOINTS
 # ------------------------------------------------------------------
 @app.route('/ping', methods=['GET'])
 def ping():
-    """Simple endpoint to verify the server is reachable."""
     logger.info("🏓 Ping received")
-    return jsonify({
-        "status": "ok", 
-        "message": "Railway server is running"
-    }), 200
+    return jsonify({"status": "ok", "message": "Railway server is running"}), 200
 
 @app.route('/test-webhook', methods=['POST'])
 def test_webhook():
-    """Test endpoint that echoes back the received payload without trading."""
     try:
         data = request.json
         logger.info(f"🧪 Test webhook received: {data}")
         return jsonify({
             "status": "test_received",
             "received_payload": data,
-            "message": "Webhook connection successful! (No trade executed)"
+            "message": "Webhook connection successful!"
         }), 200
     except Exception as e:
         logger.error(f"❌ Error in test webhook: {e}")
@@ -144,15 +142,10 @@ def test_webhook():
 
 @app.route('/', methods=['GET'])
 def root():
-    """Root endpoint for basic connectivity check."""
     return jsonify({
         "service": "Quantum Bot - TradingView to MT5 Bridge",
         "status": "online",
-        "endpoints": {
-            "/ping": "GET - Health check",
-            "/test-webhook": "POST - Test webhook without trading",
-            "/webhook": "POST - Live trading webhook"
-        }
+        "endpoints": {"/ping": "GET", "/test-webhook": "POST", "/webhook": "POST"}
     }), 200
 
 # ------------------------------------------------------------------
@@ -160,58 +153,41 @@ def root():
 # ------------------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Main webhook endpoint for TradingView signals."""
     try:
         data = request.json
         
         if not data:
             logger.warning("⚠️ Received empty request")
-            return jsonify({"status": "error", "message": "No JSON data received"}), 400
+            return jsonify({"status": "error", "message": "No JSON data"}), 400
         
         logger.info(f"📨 Received signal: {data}")
 
-        # Determine which account to trade
-        user = data.get("user_id", "ME")  # default to "ME" if not provided
+        user = data.get("user_id", "ME")
         target_id = MY_ACC_ID if user.upper() == "ME" else FRIEND_ACC_ID
 
         if not target_id:
             logger.error("❌ No valid account ID configured")
             return jsonify({"status": "error", "message": "No valid account ID"}), 400
 
-        # Symbol cleaning (remove broker prefix, add 'm' for Exness Standard)
         raw_symbol = data.get('symbol', 'EURUSD')
         clean_symbol = raw_symbol.split(':')[-1]
-        final_symbol = clean_symbol + "m"  # Remove + "m" if not needed for your broker
+        final_symbol = clean_symbol + "m"
 
-        # Action (buy/sell)
         action = data.get('action', 'buy').lower()
         if action not in ['buy', 'sell']:
-            logger.error(f"❌ Invalid action: {action}")
             return jsonify({"status": "error", "message": "Invalid action"}), 400
 
-        # Volume fallback (will be overridden if adaptive is on)
         volume = float(data.get('volume', 0.01))
-
-        # Adaptive mode flag (set to True by default)
         use_adaptive = data.get('adaptive', True)
         
-        # Check if this is a test signal
         if data.get('test', False):
-            logger.info(f"🧪 Test signal detected - no trade will be placed")
-            return jsonify({
-                "status": "test_received",
-                "target_account": user,
-                "symbol": final_symbol,
-                "action": action,
-                "message": "Test signal received - no trade executed"
-            }), 200
+            logger.info(f"🧪 Test signal - no trade placed")
+            return jsonify({"status": "test_received"}), 200
 
-        # Execute asynchronously
         result = asyncio.run(place_trade(target_id, action, final_symbol, volume, use_adaptive))
         
         return jsonify({
-            "status": "success", 
-            "message": "Trade request processed",
+            "status": "success",
             "target_account": user,
             "symbol": final_symbol,
             "action": action,
@@ -230,5 +206,4 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting Quantum Bot server on port {port}")
     logger.info(f"📡 MetaApi Token: {'✅ Configured' if TOKEN else '❌ Missing'}")
     logger.info(f"👤 My Account ID: {'✅ Configured' if MY_ACC_ID else '❌ Missing'}")
-    logger.info(f"👥 Friend Account ID: {'✅ Configured' if FRIEND_ACC_ID else '⚠️ Not set (optional)'}")
     app.run(host="0.0.0.0", port=port)
