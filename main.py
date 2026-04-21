@@ -53,6 +53,40 @@ async def fetch_account_balance(account_id):
         return None
 
 # ------------------------------------------------------------------
+# CLOSE OPPOSITE POSITIONS (NEW)
+# ------------------------------------------------------------------
+async def close_opposite_positions(account_id, symbol, new_direction):
+    """
+    Closes all open positions on the given symbol that are in the OPPOSITE direction.
+    Returns the number of positions closed.
+    """
+    api = MetaApi(TOKEN)
+    closed_count = 0
+    try:
+        account = await api.metatrader_account_api.get_account(account_id)
+        if account.state != "DEPLOYED":
+            await account.deploy()
+            await account.wait_connected()
+        connection = account.get_rpc_connection()
+        await connection.connect()
+        await connection.wait_synchronized()
+
+        positions = await connection.get_positions()
+        for pos in positions:
+            if pos['symbol'] == symbol:
+                pos_direction = "BUY" if pos['type'] in ['POSITION_TYPE_BUY'] else "SELL"
+                if pos_direction != new_direction:
+                    logger.info(f"🔄 Closing opposite position {pos['id']} ({pos_direction} {pos['volume']} lots)")
+                    await connection.close_position(pos['id'])
+                    closed_count += 1
+        if closed_count > 0:
+            logger.info(f"✅ Closed {closed_count} opposite position(s)")
+        return closed_count
+    except Exception as e:
+        logger.error(f"❌ Error closing opposite positions: {e}")
+        return 0
+
+# ------------------------------------------------------------------
 # MONITORING TASK FOR BREAK EVEN
 # ------------------------------------------------------------------
 async def monitor_position(account_id, trade2_id, trade3_id, entry_price, sl_price, tp1_price, symbol, direction):
@@ -99,7 +133,7 @@ async def monitor_position(account_id, trade2_id, trade3_id, entry_price, sl_pri
         logger.info(f"👁️ Monitoring ended for trades {trade2_id}, {trade3_id}")
 
 # ------------------------------------------------------------------
-# PLACE 3 SEPARATE TRADES (SCALING OUT)
+# PLACE 3 SEPARATE TRADES (WITH OPPOSITE CLOSE)
 # ------------------------------------------------------------------
 async def place_scaled_trades(account_id, action, symbol, volume, entry, sl, tp1, tp2, tp3, use_adaptive=True):
     api = MetaApi(TOKEN)
@@ -112,6 +146,9 @@ async def place_scaled_trades(account_id, action, symbol, volume, entry, sl, tp1
         connection = account.get_rpc_connection()
         await connection.connect()
         await connection.wait_synchronized()
+
+        # --- NEW: Close opposite positions before opening new ones ---
+        await close_opposite_positions(account_id, symbol, action.upper())
 
         final_volume = volume
         if use_adaptive:
@@ -133,7 +170,7 @@ async def place_scaled_trades(account_id, action, symbol, volume, entry, sl, tp1
         trade2_result = None
         trade3_result = None
 
-        # Place Trade 1 (TP1) – NO comment argument
+        # Place Trade 1 (TP1)
         if action.lower() == "buy":
             trade1_result = await connection.create_market_buy_order(
                 symbol, trade1_size, stop_loss=sl, take_profit=tp1
@@ -195,7 +232,7 @@ def ping():
 @app.route('/', methods=['GET'])
 def root():
     return jsonify({
-        "service": "Quantum Bot V.03 - Scaled Trading",
+        "service": "Quantum Bot V.03 - Scaled Trading with Auto Close",
         "status": "online",
         "endpoints": {"/ping": "GET", "/webhook": "POST"}
     }), 200
