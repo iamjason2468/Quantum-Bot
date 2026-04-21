@@ -53,13 +53,9 @@ async def fetch_account_balance(account_id):
         return None
 
 # ------------------------------------------------------------------
-# CLOSE OPPOSITE POSITIONS (NEW)
+# CLOSE OPPOSITE POSITIONS
 # ------------------------------------------------------------------
 async def close_opposite_positions(account_id, symbol, new_direction):
-    """
-    Closes all open positions on the given symbol that are in the OPPOSITE direction.
-    Returns the number of positions closed.
-    """
     api = MetaApi(TOKEN)
     closed_count = 0
     try:
@@ -70,7 +66,6 @@ async def close_opposite_positions(account_id, symbol, new_direction):
         connection = account.get_rpc_connection()
         await connection.connect()
         await connection.wait_synchronized()
-
         positions = await connection.get_positions()
         for pos in positions:
             if pos['symbol'] == symbol:
@@ -87,9 +82,9 @@ async def close_opposite_positions(account_id, symbol, new_direction):
         return 0
 
 # ------------------------------------------------------------------
-# MONITORING TASK FOR BREAK EVEN
+# MONITORING TASK FOR BREAK EVEN & TRAILING
 # ------------------------------------------------------------------
-async def monitor_position(account_id, trade2_id, trade3_id, entry_price, sl_price, tp1_price, symbol, direction):
+async def monitor_position(account_id, position_id, entry_price, sl_price, tp1_price, tp2_price, symbol, direction, be_buffer, trail_atr_mult=1.0):
     api = MetaApi(TOKEN)
     connection = None
     try:
@@ -99,43 +94,53 @@ async def monitor_position(account_id, trade2_id, trade3_id, entry_price, sl_pri
             await account.wait_connected()
         connection = account.get_rpc_connection()
         await connection.connect()
-        logger.info(f"👁️ Started monitoring for BE on trades {trade2_id}, {trade3_id}")
-        be_activated = False
+        logger.info(f"👁️ Started monitoring position {position_id}")
+        be_done = False
+        trail_active = False
         while True:
             await asyncio.sleep(2)
             try:
+                # Get current position info
+                pos = await connection.get_position(position_id)
+                if pos is None:
+                    logger.info(f"Position {position_id} closed, stopping monitor")
+                    break
+                # Get current price
                 price = await connection.get_symbol_price(symbol)
                 current_price = price['bid'] if direction == "BUY" else price['ask']
-                if not be_activated:
-                    if (direction == "BUY" and current_price >= tp1_price) or \
-                       (direction == "SELL" and current_price <= tp1_price):
-                        logger.info(f"🎯 TP1 reached! Moving SL to Break Even (Entry: {entry_price})")
-                        try:
-                            await connection.modify_position(trade2_id, stop_loss=entry_price)
-                            logger.info(f"✅ Trade 2 SL moved to BE: {entry_price}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not modify Trade 2 SL: {e}")
-                        try:
-                            await connection.modify_position(trade3_id, stop_loss=entry_price)
-                            logger.info(f"✅ Trade 3 SL moved to BE: {entry_price}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not modify Trade 3 SL: {e}")
-                        be_activated = True
-                        break
+                current_volume = pos['volume']
+                initial_volume = pos.get('initialVolume', current_volume)
+                # TP1 hit detection (volume reduced)
+                if not be_done and current_volume < initial_volume * 0.8:  # approx TP1 portion closed
+                    logger.info(f"🎯 TP1 portion closed! Activating Break Even with buffer")
+                    if direction == "BUY":
+                        be_sl = entry_price + be_buffer
+                    else:
+                        be_sl = entry_price - be_buffer
+                    await connection.modify_position(position_id, stop_loss=be_sl)
+                    logger.info(f"✅ SL moved to BE + buffer: {be_sl}")
+                    be_done = True
+                # TP2 hit detection & trailing activation
+                if be_done and not trail_active and current_volume < initial_volume * 0.5:
+                    logger.info(f"🎯 TP2 portion closed! Activating Trailing Stop")
+                    # Use MetaApi trailing stop feature
+                    await connection.modify_position(position_id, trailing_stop=trail_atr_mult * be_buffer * 10)  # adjust as needed
+                    trail_active = True
+                    logger.info(f"✅ Trailing stop activated")
             except Exception as e:
-                logger.warning(f"⚠️ Monitoring error: {e}")
+                logger.warning(f"⚠️ Monitoring loop error: {e}")
                 continue
     except Exception as e:
         logger.error(f"❌ Monitor task failed: {e}")
     finally:
         if connection:
             await connection.close()
-        logger.info(f"👁️ Monitoring ended for trades {trade2_id}, {trade3_id}")
+        logger.info(f"👁️ Monitoring ended for position {position_id}")
 
 # ------------------------------------------------------------------
-# PLACE 3 SEPARATE TRADES (WITH OPPOSITE CLOSE)
+# PLACE SINGLE TRADE WITH MULTIPLE TPs
 # ------------------------------------------------------------------
-async def place_scaled_trades(account_id, action, symbol, volume, entry, sl, tp1, tp2, tp3, use_adaptive=True):
+async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive=True):
     api = MetaApi(TOKEN)
     try:
         account = await api.metatrader_account_api.get_account(account_id)
@@ -147,7 +152,7 @@ async def place_scaled_trades(account_id, action, symbol, volume, entry, sl, tp1
         await connection.connect()
         await connection.wait_synchronized()
 
-        # --- NEW: Close opposite positions before opening new ones ---
+        # Close opposite positions first
         await close_opposite_positions(account_id, symbol, action.upper())
 
         final_volume = volume
@@ -155,68 +160,36 @@ async def place_scaled_trades(account_id, action, symbol, volume, entry, sl, tp1
             balance = await fetch_account_balance(account_id)
             if balance is not None:
                 final_volume = get_adaptive_lot(balance)
-                logger.info(f"📊 Balance: ${balance:.2f} → Total Lot: {final_volume}")
-        trade1_size = round(final_volume * 0.33, 3)
-        trade2_size = round(final_volume * 0.33, 3)
-        trade3_size = round(final_volume * 0.34, 3)
-        logger.info(f"📦 Scaling out: {trade1_size} / {trade2_size} / {trade3_size} lots")
+                logger.info(f"📊 Balance: ${balance:.2f} → Lot: {final_volume}")
 
-        symbols = await connection.get_symbols()
-        if symbol not in symbols:
-            logger.error(f"❌ Symbol {symbol} not found")
-            return {"error": f"Symbol {symbol} not found"}
+        # Build TP list
+        tp_list = [tp1, tp2, tp3]
+        if include_tp4:
+            tp_list.append(tp4)
+            logger.info(f"🔥 Trend Rider active: TP4 = {tp4}")
 
-        trade1_result = None
-        trade2_result = None
-        trade3_result = None
-
-        # Place Trade 1 (TP1)
+        # Place the order
         if action.lower() == "buy":
-            trade1_result = await connection.create_market_buy_order(
-                symbol, trade1_size, stop_loss=sl, take_profit=tp1
+            result = await connection.create_market_buy_order(
+                symbol, final_volume,
+                stop_loss=sl,
+                take_profit=tp_list
             )
         else:
-            trade1_result = await connection.create_market_sell_order(
-                symbol, trade1_size, stop_loss=sl, take_profit=tp1
+            result = await connection.create_market_sell_order(
+                symbol, final_volume,
+                stop_loss=sl,
+                take_profit=tp_list
             )
-        logger.info(f"✅ Trade 1 (TP1) placed: {trade1_result.get('positionId')}")
 
-        # Place Trade 2 (TP2)
-        if action.lower() == "buy":
-            trade2_result = await connection.create_market_buy_order(
-                symbol, trade2_size, stop_loss=sl, take_profit=tp2
-            )
-        else:
-            trade2_result = await connection.create_market_sell_order(
-                symbol, trade2_size, stop_loss=sl, take_profit=tp2
-            )
-        logger.info(f"✅ Trade 2 (TP2) placed: {trade2_result.get('positionId')}")
+        position_id = result.get('positionId')
+        logger.info(f"✅ {action.upper()} {final_volume} {symbol} with {len(tp_list)} TPs. Position ID: {position_id}")
 
-        # Place Trade 3 (TP3)
-        if action.lower() == "buy":
-            trade3_result = await connection.create_market_buy_order(
-                symbol, trade3_size, stop_loss=sl, take_profit=tp3
-            )
-        else:
-            trade3_result = await connection.create_market_sell_order(
-                symbol, trade3_size, stop_loss=sl, take_profit=tp3
-            )
-        logger.info(f"✅ Trade 3 (TP3) placed: {trade3_result.get('positionId')}")
-
-        # Start monitoring for Break Even
-        if trade2_result and trade3_result:
-            trade2_id = trade2_result.get('positionId')
-            trade3_id = trade3_result.get('positionId')
-            asyncio.create_task(
-                monitor_position(account_id, trade2_id, trade3_id, entry, sl, tp1, symbol, action.upper())
-            )
-            logger.info(f"🔍 Break Even monitor started for trades {trade2_id}, {trade3_id}")
-
-        return {
-            "trade1": trade1_result,
-            "trade2": trade2_result,
-            "trade3": trade3_result
-        }
+        # Start monitoring for BE & trailing
+        asyncio.create_task(
+            monitor_position(account_id, position_id, entry, sl, tp1, tp2, symbol, action.upper(), be_buffer)
+        )
+        return result
 
     except Exception as e:
         logger.error(f"❌ Trade error: {e}")
@@ -232,7 +205,7 @@ def ping():
 @app.route('/', methods=['GET'])
 def root():
     return jsonify({
-        "service": "Quantum Bot V.03 - Scaled Trading with Auto Close",
+        "service": "Quantum Bot V.04 - Single Position with Trend Rider",
         "status": "online",
         "endpoints": {"/ping": "GET", "/webhook": "POST"}
     }), 200
@@ -265,15 +238,20 @@ def webhook():
         tp1 = float(data.get('tp1', 0))
         tp2 = float(data.get('tp2', 0))
         tp3 = float(data.get('tp3', 0))
+        tp4 = float(data.get('tp4', 0)) if 'tp4' in data else 0.0
+        include_tp4 = 'tp4' in data
+        be_buffer = float(data.get('be_buffer', 0.0))
 
         logger.info(f"📊 Entry: {entry}, SL: {sl}, TP1: {tp1}, TP2: {tp2}, TP3: {tp3}")
+        if include_tp4:
+            logger.info(f"📊 TP4 (Trend Rider): {tp4}")
 
         if data.get('test', False):
             logger.info(f"🧪 Test signal - no trade placed")
             return jsonify({"status": "test_received"}), 200
 
         result = asyncio.run(
-            place_scaled_trades(target_id, action, final_symbol, volume, entry, sl, tp1, tp2, tp3, use_adaptive)
+            place_single_trade(target_id, action, final_symbol, volume, entry, sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive)
         )
         return jsonify({
             "status": "success",
@@ -292,7 +270,7 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot V.03 on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot V.04 on port {port}")
     logger.info(f"📡 MetaApi Token: {'✅' if TOKEN else '❌'}")
     logger.info(f"👤 My Account ID: {'✅' if MY_ACC_ID else '❌'}")
     app.run(host="0.0.0.0", port=port)
