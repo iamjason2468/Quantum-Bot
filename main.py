@@ -21,11 +21,17 @@ TOKEN = os.getenv('META_API_TOKEN')
 MY_ACC_ID = os.getenv('MY_ACCOUNT_ID')
 FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 SYMBOL_SUFFIX = os.getenv('SYMBOL_SUFFIX', 'm')
+GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', '')  # Gold usually has no suffix
 
-# Risk management settings
+# Risk management settings (can be overridden per symbol)
 BREAKEVEN_TRIGGER_ATR_MULT = 1.0
 TRAILING_START_ATR_MULT = 1.5
 TRAILING_DISTANCE_ATR_MULT = 0.5
+
+# Gold-specific settings (tighter because gold moves faster)
+GOLD_BREAKEVEN_TRIGGER_ATR_MULT = 0.75
+GOLD_TRAILING_START_ATR_MULT = 1.0
+GOLD_TRAILING_DISTANCE_ATR_MULT = 0.5
 
 if not TOKEN:
     logger.error("❌ META_API_TOKEN is not set")
@@ -33,33 +39,38 @@ if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
 # ------------------------------------------------------------------
-# PERSISTENT EVENT LOOP FOR ASYNC OPERATIONS
+# HELPER: Detect if symbol is Gold
 # ------------------------------------------------------------------
-_async_loop = None
-_loop_thread = None
+def is_gold(symbol):
+    """Return True if symbol is Gold/XAUUSD."""
+    symbol_upper = symbol.upper()
+    return 'XAU' in symbol_upper or 'GOLD' in symbol_upper
 
-def get_async_loop():
-    """Return a persistent event loop that runs in a background thread."""
-    global _async_loop, _loop_thread
-    
-    if _async_loop is None:
-        _async_loop = asyncio.new_event_loop()
-        
-        def run_loop():
-            asyncio.set_event_loop(_async_loop)
-            _async_loop.run_forever()
-        
-        _loop_thread = threading.Thread(target=run_loop, daemon=True)
-        _loop_thread.start()
-        logger.info("🔄 Persistent async event loop started")
-    
-    return _async_loop
+# ------------------------------------------------------------------
+# HELPER: Get pip value for symbol
+# ------------------------------------------------------------------
+def get_pip_value(symbol):
+    """Return pip value based on symbol type."""
+    if is_gold(symbol):
+        return 0.01  # Gold: 1 pip = $0.01 movement
+    elif 'JPY' in symbol.upper():
+        return 0.01  # JPY pairs: 1 pip = 0.01
+    else:
+        return 0.0001  # Standard forex: 1 pip = 0.0001
 
-def run_async(coro):
-    """Run coroutine on the persistent event loop."""
-    loop = get_async_loop()
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=30)  # 30 second timeout
+# ------------------------------------------------------------------
+# HELPER: Get risk multipliers for symbol
+# ------------------------------------------------------------------
+def get_risk_multipliers(symbol):
+    """Return (be_trigger, trail_start, trail_dist) for symbol."""
+    if is_gold(symbol):
+        return (GOLD_BREAKEVEN_TRIGGER_ATR_MULT, 
+                GOLD_TRAILING_START_ATR_MULT, 
+                GOLD_TRAILING_DISTANCE_ATR_MULT)
+    else:
+        return (BREAKEVEN_TRIGGER_ATR_MULT, 
+                TRAILING_START_ATR_MULT, 
+                TRAILING_DISTANCE_ATR_MULT)
 
 # ------------------------------------------------------------------
 # LAZY METAAPI INITIALIZATION
@@ -79,38 +90,50 @@ def get_metaapi():
 # GLOBAL CONNECTION CACHE
 # ------------------------------------------------------------------
 connections = {}
-connection_lock = threading.Lock()
+connection_lock = asyncio.Lock()
 
 async def get_connection(account_id):
-    # Note: No asyncio.Lock needed since we're on a single loop thread
-    if account_id in connections:
-        return connections[account_id]
+    async with connection_lock:
+        if account_id in connections:
+            return connections[account_id]
 
-    logger.info(f"🔌 Establishing new connection for account {account_id}")
-    api = get_metaapi()
-    account = await api.metatrader_account_api.get_account(account_id)
-    if account.state != "DEPLOYED":
-        logger.info(f"⏳ Deploying account {account_id}...")
-        await account.deploy()
-        await account.wait_connected()
-    connection = account.get_rpc_connection()
-    await connection.connect()
-    await connection.wait_synchronized()
-    connections[account_id] = connection
-    return connection
+        logger.info(f"🔌 Establishing new connection for account {account_id}")
+        api = get_metaapi()
+        account = await api.metatrader_account_api.get_account(account_id)
+        if account.state != "DEPLOYED":
+            logger.info(f"⏳ Deploying account {account_id}...")
+            await account.deploy()
+            await account.wait_connected()
+        connection = account.get_rpc_connection()
+        await connection.connect()
+        await connection.wait_synchronized()
+        connections[account_id] = connection
+        return connection
 
 # ------------------------------------------------------------------
 # ADAPTIVE LOT SIZING
 # ------------------------------------------------------------------
-def get_adaptive_lot(account_balance):
-    if account_balance < 50:
-        return 0.01
-    elif account_balance < 200:
-        return 0.01
-    elif account_balance < 1000:
-        return 0.05
+def get_adaptive_lot(account_balance, symbol=""):
+    # Gold typically uses smaller lots due to higher value
+    if is_gold(symbol):
+        if account_balance < 100:
+            return 0.01
+        elif account_balance < 500:
+            return 0.02
+        elif account_balance < 1000:
+            return 0.05
+        else:
+            return 0.10
     else:
-        return 0.10
+        # Forex
+        if account_balance < 50:
+            return 0.01
+        elif account_balance < 200:
+            return 0.01
+        elif account_balance < 1000:
+            return 0.05
+        else:
+            return 0.10
 
 async def fetch_account_balance(account_id):
     try:
@@ -156,8 +179,8 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
         if use_adaptive:
             balance = await fetch_account_balance(account_id)
             if balance is not None:
-                final_volume = get_adaptive_lot(balance)
-                logger.info(f"📊 Balance: ${balance:.2f} → Lot: {final_volume}")
+                final_volume = get_adaptive_lot(balance, symbol)
+                logger.info(f"📊 Balance: ${balance:.2f} → Lot: {final_volume} ({symbol})")
 
         tp_levels = [tp1, tp2, tp3]
         if include_tp4:
@@ -194,7 +217,8 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
             if isinstance(result, dict):
                 pos_id = result.get('positionId')
 
-            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id})
+            tracking_id = f"bot_{symbol}_{int(time.time() * 1000)}_{idx}"
+            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id, "trackingId": tracking_id})
             logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volume_per_tp} | PosID: {pos_id}")
 
         logger.info(f"✅ {action.upper()} total {final_volume} {symbol} split into {num_tps} positions")
@@ -218,7 +242,7 @@ async def get_symbol_atr(connection, symbol):
     try:
         candles = await connection.get_candles(symbol, '1m', 15)
         if len(candles) < 15:
-            return 0.0001
+            return 0.01 if is_gold(symbol) else 0.0001
         tr_values = []
         for i in range(1, len(candles)):
             high = candles[i]['high']
@@ -228,13 +252,14 @@ async def get_symbol_atr(connection, symbol):
             tr_values.append(tr)
         atr = sum(tr_values) / len(tr_values)
         atr_cache[symbol] = {'value': atr, 'timestamp': now}
+        logger.info(f"📊 ATR for {symbol}: {atr}")
         return atr
     except Exception as e:
         logger.warning(f"ATR fetch failed for {symbol}: {e}")
-        return 0.0001
+        return 0.01 if is_gold(symbol) else 0.0001
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (runs on persistent loop)
+# POSITION MANAGER (Gold + Forex Compatible)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
@@ -245,7 +270,10 @@ async def position_manager_loop(account_id):
         try:
             connection = await get_connection(account_id)
             positions = await connection.get_positions()
-            
+            if not positions:
+                await asyncio.sleep(5)
+                continue
+
             for pos in positions:
                 symbol = pos['symbol']
                 position_id = pos['id']
@@ -254,7 +282,9 @@ async def position_manager_loop(account_id):
                 current_price = pos['currentPrice']
                 pos_type = pos['type']
 
-                pip_value = 0.0001 if 'JPY' not in symbol else 0.01
+                # Get symbol-specific settings
+                pip_value = get_pip_value(symbol)
+                be_trigger_mult, trail_start_mult, trail_dist_mult = get_risk_multipliers(symbol)
 
                 if pos_type == 'POSITION_TYPE_BUY':
                     profit_pips = (current_price - entry) / pip_value
@@ -265,7 +295,7 @@ async def position_manager_loop(account_id):
                 atr_pips = atr / pip_value
 
                 # Breakeven
-                be_trigger_pips = atr_pips * BREAKEVEN_TRIGGER_ATR_MULT
+                be_trigger_pips = atr_pips * be_trigger_mult
                 if profit_pips >= be_trigger_pips and position_id not in breakeven_done:
                     buffer = 2 * pip_value
                     if pos_type == 'POSITION_TYPE_BUY':
@@ -276,12 +306,12 @@ async def position_manager_loop(account_id):
                     if (pos_type == 'POSITION_TYPE_BUY' and new_sl > current_sl) or \
                        (pos_type == 'POSITION_TYPE_SELL' and new_sl < current_sl):
                         await connection.update_position(position_id, {'stopLoss': new_sl})
-                        logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
+                        logger.info(f"🎯 Breakeven: Moved SL of {position_id} ({symbol}) to {new_sl} (profit: {profit_pips:.1f} pips)")
                         breakeven_done.add(position_id)
 
                 # Trailing
-                trail_start_pips = atr_pips * TRAILING_START_ATR_MULT
-                trail_distance_pips = atr_pips * TRAILING_DISTANCE_ATR_MULT
+                trail_start_pips = atr_pips * trail_start_mult
+                trail_distance_pips = atr_pips * trail_dist_mult
                 if profit_pips >= trail_start_pips:
                     trail_distance_price = trail_distance_pips * pip_value
                     if pos_type == 'POSITION_TYPE_BUY':
@@ -289,14 +319,14 @@ async def position_manager_loop(account_id):
                         if new_sl > current_sl:
                             if position_id not in trail_updated or abs(new_sl - trail_updated[position_id]) > pip_value * 0.5:
                                 await connection.update_position(position_id, {'stopLoss': new_sl})
-                                logger.info(f"📈 Trailing: SL of {position_id} moved to {new_sl}")
+                                logger.info(f"📈 Trailing: SL of {position_id} ({symbol}) moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
                     else:
                         new_sl = current_price + trail_distance_price
                         if new_sl < current_sl:
                             if position_id not in trail_updated or abs(new_sl - trail_updated[position_id]) > pip_value * 0.5:
                                 await connection.update_position(position_id, {'stopLoss': new_sl})
-                                logger.info(f"📉 Trailing: SL of {position_id} moved to {new_sl}")
+                                logger.info(f"📉 Trailing: SL of {position_id} ({symbol}) moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
 
             await asyncio.sleep(5)
@@ -305,8 +335,30 @@ async def position_manager_loop(account_id):
             logger.error(f"❌ Position manager error: {e}")
             await asyncio.sleep(10)
 
+# ------------------------------------------------------------------
+# PERSISTENT EVENT LOOP
+# ------------------------------------------------------------------
+_async_loop = None
+_loop_thread = None
+
+def get_async_loop():
+    global _async_loop, _loop_thread
+    if _async_loop is None:
+        _async_loop = asyncio.new_event_loop()
+        def run_loop():
+            asyncio.set_event_loop(_async_loop)
+            _async_loop.run_forever()
+        _loop_thread = threading.Thread(target=run_loop, daemon=True)
+        _loop_thread.start()
+        logger.info("🔄 Persistent async event loop started")
+    return _async_loop
+
+def run_async(coro):
+    loop = get_async_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=30)
+
 def start_position_manager(account_id):
-    """Start position manager on the persistent event loop."""
     loop = get_async_loop()
     asyncio.run_coroutine_threadsafe(position_manager_loop(account_id), loop)
     logger.info(f"🧵 Position manager scheduled for account {account_id}")
@@ -340,7 +392,12 @@ def webhook():
 
         raw_symbol = data.get('symbol', 'EURUSD')
         clean_symbol = raw_symbol.split(':')[-1]
-        final_symbol = clean_symbol + SYMBOL_SUFFIX
+        
+        # Apply correct suffix based on symbol type
+        if is_gold(clean_symbol):
+            final_symbol = clean_symbol + GOLD_SUFFIX
+        else:
+            final_symbol = clean_symbol + SYMBOL_SUFFIX
 
         action = data.get('action', 'buy').lower()
         volume = float(data.get('volume', 0.01))
@@ -354,7 +411,7 @@ def webhook():
         include_tp4 = 'tp4' in data
         be_buffer = float(data.get('be_buffer', 0.0))
 
-        logger.info(f"📊 Entry: {entry}, SL: {sl}, TP1: {tp1}, TP2: {tp2}, TP3: {tp3}")
+        logger.info(f"📊 {final_symbol} | Entry: {entry}, SL: {sl}, TP1: {tp1}, TP2: {tp2}, TP3: {tp3}")
         if include_tp4:
             logger.info(f"📊 TP4 (Trend Rider): {tp4}")
 
@@ -382,7 +439,7 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot V.04 on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot V.05 (Gold + Forex) on port {port}")
 
     # Start persistent event loop
     get_async_loop()
