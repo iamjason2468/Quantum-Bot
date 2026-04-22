@@ -21,22 +21,34 @@ TOKEN = os.getenv('META_API_TOKEN')
 MY_ACC_ID = os.getenv('MY_ACCOUNT_ID')
 FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 SYMBOL_SUFFIX = os.getenv('SYMBOL_SUFFIX', 'm')
-GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')  # Default to 'm' for Exness
+GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')
 
-# Risk management settings (can be overridden per symbol)
-BREAKEVEN_TRIGGER_ATR_MULT = 1.0
-TRAILING_START_ATR_MULT = 1.5
-TRAILING_DISTANCE_ATR_MULT = 0.5
+# Lot size multiplier (default 1.0 = no change)
+LOT_MULTIPLIER = float(os.getenv('LOT_MULTIPLIER', '1.0'))
 
-# Gold-specific settings (tighter because gold moves faster)
-GOLD_BREAKEVEN_TRIGGER_ATR_MULT = 0.75
-GOLD_TRAILING_START_ATR_MULT = 1.0
-GOLD_TRAILING_DISTANCE_ATR_MULT = 0.5
+# Forex risk settings
+FOREX_BREAKEVEN_TRIGGER_ATR_MULT = float(os.getenv('FOREX_BE_ATR', '1.0'))
+FOREX_TRAILING_START_ATR_MULT = float(os.getenv('FOREX_TRAIL_START_ATR', '1.5'))
+FOREX_TRAILING_DISTANCE_ATR_MULT = float(os.getenv('FOREX_TRAIL_DIST_ATR', '0.5'))
+
+# Gold risk settings (tighter because gold moves faster)
+GOLD_BREAKEVEN_TRIGGER_ATR_MULT = float(os.getenv('GOLD_BE_ATR', '0.5'))
+GOLD_TRAILING_START_ATR_MULT = float(os.getenv('GOLD_TRAIL_START_ATR', '1.0'))
+GOLD_TRAILING_DISTANCE_ATR_MULT = float(os.getenv('GOLD_TRAIL_DIST_ATR', '0.5'))
+
+# Gold-specific: Force BE when TP1 is hit
+GOLD_FORCE_BE_AT_TP1 = os.getenv('GOLD_FORCE_BE_AT_TP1', 'true').lower() == 'true'
+GOLD_TP1_BE_BUFFER_PCT = float(os.getenv('GOLD_TP1_BE_BUFFER_PCT', '0.2'))  # 20% below TP1
 
 if not TOKEN:
     logger.error("❌ META_API_TOKEN is not set")
 if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
+
+logger.info(f"📊 Lot Multiplier: {LOT_MULTIPLIER}x")
+logger.info(f"💱 Forex BE: {FOREX_BREAKEVEN_TRIGGER_ATR_MULT} ATR, Trail: {FOREX_TRAILING_START_ATR_MULT}/{FOREX_TRAILING_DISTANCE_ATR_MULT}")
+logger.info(f"🪙 Gold BE: {GOLD_BREAKEVEN_TRIGGER_ATR_MULT} ATR, Trail: {GOLD_TRAILING_START_ATR_MULT}/{GOLD_TRAILING_DISTANCE_ATR_MULT}")
+logger.info(f"🪙 Gold Force BE at TP1: {GOLD_FORCE_BE_AT_TP1} (buffer: {GOLD_TP1_BE_BUFFER_PCT*100}%)")
 
 # ------------------------------------------------------------------
 # HELPER: Detect if symbol is Gold
@@ -68,9 +80,9 @@ def get_risk_multipliers(symbol):
                 GOLD_TRAILING_START_ATR_MULT, 
                 GOLD_TRAILING_DISTANCE_ATR_MULT)
     else:
-        return (BREAKEVEN_TRIGGER_ATR_MULT, 
-                TRAILING_START_ATR_MULT, 
-                TRAILING_DISTANCE_ATR_MULT)
+        return (FOREX_BREAKEVEN_TRIGGER_ATR_MULT, 
+                FOREX_TRAILING_START_ATR_MULT, 
+                FOREX_TRAILING_DISTANCE_ATR_MULT)
 
 # ------------------------------------------------------------------
 # LAZY METAAPI INITIALIZATION
@@ -97,7 +109,6 @@ async def get_connection(account_id):
         if account_id in connections:
             conn = connections[account_id]
             try:
-                # Test if connection is still alive (5 second timeout)
                 await asyncio.wait_for(conn.get_account_information(), timeout=5.0)
                 return conn
             except Exception as e:
@@ -118,29 +129,33 @@ async def get_connection(account_id):
         return connection
 
 # ------------------------------------------------------------------
-# ADAPTIVE LOT SIZING
+# ADAPTIVE LOT SIZING (with multiplier)
 # ------------------------------------------------------------------
 def get_adaptive_lot(account_balance, symbol=""):
-    # Gold typically uses smaller lots due to higher value
+    # Base lot calculation
     if is_gold(symbol):
         if account_balance < 100:
-            return 0.01
+            base_lot = 0.01
         elif account_balance < 500:
-            return 0.02
+            base_lot = 0.02
         elif account_balance < 1000:
-            return 0.05
+            base_lot = 0.05
         else:
-            return 0.10
+            base_lot = 0.10
     else:
-        # Forex
         if account_balance < 50:
-            return 0.01
+            base_lot = 0.01
         elif account_balance < 200:
-            return 0.01
+            base_lot = 0.01
         elif account_balance < 1000:
-            return 0.05
+            base_lot = 0.05
         else:
-            return 0.10
+            base_lot = 0.10
+    
+    # Apply multiplier
+    final_lot = base_lot * LOT_MULTIPLIER
+    final_lot = max(0.01, round(final_lot, 2))
+    return final_lot
 
 async def fetch_account_balance(account_id):
     try:
@@ -259,19 +274,19 @@ async def get_symbol_atr(connection, symbol):
             tr_values.append(tr)
         atr = sum(tr_values) / len(tr_values)
         atr_cache[symbol] = {'value': atr, 'timestamp': now}
-        logger.info(f"📊 ATR for {symbol}: {atr}")
         return atr
     except Exception as e:
         logger.warning(f"ATR fetch failed for {symbol}: {e}")
         return 0.01 if is_gold(symbol) else 0.0001
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (with connection recovery)
+# POSITION MANAGER (with Gold force-BE at TP1)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
     breakeven_done = set()
     trail_updated = {}
+    tp1_hit_tracking = set()  # Track which trade groups had TP1 hit
 
     while True:
         try:
@@ -281,6 +296,16 @@ async def position_manager_loop(account_id):
                 await asyncio.sleep(5)
                 continue
 
+            # Group positions by symbol and entry price (to identify same trade)
+            trade_groups = {}
+            for pos in positions:
+                symbol = pos['symbol']
+                entry = pos['openPrice']
+                key = f"{symbol}_{entry}"
+                if key not in trade_groups:
+                    trade_groups[key] = []
+                trade_groups[key].append(pos)
+
             for pos in positions:
                 symbol = pos['symbol']
                 position_id = pos['id']
@@ -288,6 +313,7 @@ async def position_manager_loop(account_id):
                 current_sl = pos.get('stopLoss', 0)
                 current_price = pos['currentPrice']
                 pos_type = pos['type']
+                take_profit = pos.get('takeProfit', 0)
 
                 # Get symbol-specific settings
                 pip_value = get_pip_value(symbol)
@@ -295,13 +321,41 @@ async def position_manager_loop(account_id):
 
                 if pos_type == 'POSITION_TYPE_BUY':
                     profit_pips = (current_price - entry) / pip_value
+                    tp1_price = min([p.get('takeProfit', 0) for p in trade_groups.get(f"{symbol}_{entry}", []) if p.get('takeProfit', 0) > 0] or [0])
                 else:
                     profit_pips = (entry - current_price) / pip_value
+                    tp1_price = max([p.get('takeProfit', 0) for p in trade_groups.get(f"{symbol}_{entry}", []) if p.get('takeProfit', 0) > 0] or [999999])
 
                 atr = await get_symbol_atr(connection, symbol)
                 atr_pips = atr / pip_value
 
-                # Breakeven
+                # Gold-specific: Force BE when TP1 is about to be hit
+                trade_key = f"{symbol}_{entry}"
+                if is_gold(symbol) and GOLD_FORCE_BE_AT_TP1:
+                    if trade_key not in tp1_hit_tracking:
+                        # Check if price is near TP1 (within buffer)
+                        tp1_distance = abs(tp1_price - current_price)
+                        tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
+                        
+                        if tp1_distance <= tp1_threshold:
+                            logger.info(f"🪙 Gold TP1 approaching! Price: {current_price}, TP1: {tp1_price}")
+                            # Move ALL positions in this trade group to BE
+                            for group_pos in trade_groups.get(trade_key, []):
+                                if group_pos['id'] not in breakeven_done:
+                                    buffer = 2 * pip_value
+                                    if pos_type == 'POSITION_TYPE_BUY':
+                                        new_sl = entry + buffer
+                                    else:
+                                        new_sl = entry - buffer
+                                    
+                                    if (pos_type == 'POSITION_TYPE_BUY' and new_sl > group_pos.get('stopLoss', 0)) or \
+                                       (pos_type == 'POSITION_TYPE_SELL' and new_sl < group_pos.get('stopLoss', 0)):
+                                        await connection.update_position(group_pos['id'], {'stopLoss': new_sl})
+                                        logger.info(f"🎯 Force BE: Moved SL of {group_pos['id']} to {new_sl}")
+                                        breakeven_done.add(group_pos['id'])
+                            tp1_hit_tracking.add(trade_key)
+
+                # Regular Breakeven (ATR-based)
                 be_trigger_pips = atr_pips * be_trigger_mult
                 if profit_pips >= be_trigger_pips and position_id not in breakeven_done:
                     buffer = 2 * pip_value
@@ -340,7 +394,6 @@ async def position_manager_loop(account_id):
 
         except Exception as e:
             logger.error(f"❌ Position manager error: {e}")
-            # Clear dead connection from cache
             async with connection_lock:
                 if account_id in connections:
                     del connections[account_id]
@@ -383,10 +436,10 @@ def ping():
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({"service": "Quantum Bot V.05", "status": "online"}), 200
+    return jsonify({"service": "Quantum Bot V.06", "status": "online"}), 200
 
 # ------------------------------------------------------------------
-# WEBHOOK ENDPOINT (with better error logging and auto symbol detection)
+# WEBHOOK ENDPOINT
 # ------------------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -404,14 +457,11 @@ def webhook():
         raw_symbol = data.get('symbol', 'EURUSD')
         clean_symbol = raw_symbol.split(':')[-1]
         
-        # Apply correct suffix based on symbol type with auto-detection
         if is_gold(clean_symbol):
-            # Gold: Use GOLD_SUFFIX if set, otherwise default to 'm' for Exness
             suffix = GOLD_SUFFIX if GOLD_SUFFIX else 'm'
             final_symbol = clean_symbol + suffix
             logger.info(f"🪙 Gold detected: {clean_symbol} → {final_symbol}")
         else:
-            # Forex: Use SYMBOL_SUFFIX
             final_symbol = clean_symbol + SYMBOL_SUFFIX
             logger.info(f"💱 Forex detected: {clean_symbol} → {final_symbol}")
 
@@ -458,12 +508,10 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot V.05 (Gold + Forex Auto-Detect) on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot V.06 on port {port}")
 
-    # Start persistent event loop
     get_async_loop()
 
-    # Start position managers
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
     if FRIEND_ACC_ID and FRIEND_ACC_ID != MY_ACC_ID:
