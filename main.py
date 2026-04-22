@@ -87,7 +87,7 @@ def get_metaapi():
     return _metaapi_instance
 
 # ------------------------------------------------------------------
-# GLOBAL CONNECTION CACHE
+# GLOBAL CONNECTION CACHE (with health check)
 # ------------------------------------------------------------------
 connections = {}
 connection_lock = asyncio.Lock()
@@ -95,7 +95,14 @@ connection_lock = asyncio.Lock()
 async def get_connection(account_id):
     async with connection_lock:
         if account_id in connections:
-            return connections[account_id]
+            conn = connections[account_id]
+            try:
+                # Test if connection is still alive (5 second timeout)
+                await asyncio.wait_for(conn.get_account_information(), timeout=5.0)
+                return conn
+            except Exception as e:
+                logger.warning(f"⚠️ Existing connection dead for {account_id}: {e}")
+                del connections[account_id]
 
         logger.info(f"🔌 Establishing new connection for account {account_id}")
         api = get_metaapi()
@@ -259,7 +266,7 @@ async def get_symbol_atr(connection, symbol):
         return 0.01 if is_gold(symbol) else 0.0001
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (Gold + Forex Compatible)
+# POSITION MANAGER (with connection recovery)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
@@ -333,6 +340,10 @@ async def position_manager_loop(account_id):
 
         except Exception as e:
             logger.error(f"❌ Position manager error: {e}")
+            # Clear dead connection from cache
+            async with connection_lock:
+                if account_id in connections:
+                    del connections[account_id]
             await asyncio.sleep(10)
 
 # ------------------------------------------------------------------
@@ -372,10 +383,10 @@ def ping():
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({"service": "Quantum Bot V.04", "status": "online"}), 200
+    return jsonify({"service": "Quantum Bot V.05", "status": "online"}), 200
 
 # ------------------------------------------------------------------
-# WEBHOOK ENDPOINT
+# WEBHOOK ENDPOINT (with better error logging)
 # ------------------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -415,23 +426,26 @@ def webhook():
         if include_tp4:
             logger.info(f"📊 TP4 (Trend Rider): {tp4}")
 
-        result = run_async(
-            place_single_trade(
-                target_id, action, final_symbol, volume, entry,
-                sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive
+        try:
+            result = run_async(
+                place_single_trade(
+                    target_id, action, final_symbol, volume, entry,
+                    sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive
+                )
             )
-        )
-
-        return jsonify({
-            "status": "success",
-            "target_account": user,
-            "symbol": final_symbol,
-            "action": action,
-            "result": result
-        }), 200
+            return jsonify({
+                "status": "success",
+                "target_account": user,
+                "symbol": final_symbol,
+                "action": action,
+                "result": result
+            }), 200
+        except Exception as trade_error:
+            logger.error(f"❌ Trade execution error: {trade_error}", exc_info=True)
+            return jsonify({"status": "error", "message": str(trade_error)}), 500
 
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ------------------------------------------------------------------
