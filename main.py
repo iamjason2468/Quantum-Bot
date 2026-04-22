@@ -21,7 +21,7 @@ TOKEN = os.getenv('META_API_TOKEN')
 MY_ACC_ID = os.getenv('MY_ACCOUNT_ID')
 FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 SYMBOL_SUFFIX = os.getenv('SYMBOL_SUFFIX', 'm')
-GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', '')  # Gold usually has no suffix
+GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')  # Default to 'm' for Exness
 
 # Risk management settings (can be overridden per symbol)
 BREAKEVEN_TRIGGER_ATR_MULT = 1.0
@@ -386,7 +386,7 @@ def root():
     return jsonify({"service": "Quantum Bot V.05", "status": "online"}), 200
 
 # ------------------------------------------------------------------
-# WEBHOOK ENDPOINT (with better error logging)
+# WEBHOOK ENDPOINT (with better error logging and auto symbol detection)
 # ------------------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -404,11 +404,16 @@ def webhook():
         raw_symbol = data.get('symbol', 'EURUSD')
         clean_symbol = raw_symbol.split(':')[-1]
         
-        # Apply correct suffix based on symbol type
+        # Apply correct suffix based on symbol type with auto-detection
         if is_gold(clean_symbol):
-            final_symbol = clean_symbol + GOLD_SUFFIX
+            # Gold: Use GOLD_SUFFIX if set, otherwise default to 'm' for Exness
+            suffix = GOLD_SUFFIX if GOLD_SUFFIX else 'm'
+            final_symbol = clean_symbol + suffix
+            logger.info(f"🪙 Gold detected: {clean_symbol} → {final_symbol}")
         else:
+            # Forex: Use SYMBOL_SUFFIX
             final_symbol = clean_symbol + SYMBOL_SUFFIX
+            logger.info(f"💱 Forex detected: {clean_symbol} → {final_symbol}")
 
         action = data.get('action', 'buy').lower()
         volume = float(data.get('volume', 0.01))
@@ -453,7 +458,7 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot V.05 (Gold + Forex) on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot V.05 (Gold + Forex Auto-Detect) on port {port}")
 
     # Start persistent event loop
     get_async_loop()
