@@ -33,6 +33,35 @@ if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
 # ------------------------------------------------------------------
+# PERSISTENT EVENT LOOP FOR ASYNC OPERATIONS
+# ------------------------------------------------------------------
+_async_loop = None
+_loop_thread = None
+
+def get_async_loop():
+    """Return a persistent event loop that runs in a background thread."""
+    global _async_loop, _loop_thread
+    
+    if _async_loop is None:
+        _async_loop = asyncio.new_event_loop()
+        
+        def run_loop():
+            asyncio.set_event_loop(_async_loop)
+            _async_loop.run_forever()
+        
+        _loop_thread = threading.Thread(target=run_loop, daemon=True)
+        _loop_thread.start()
+        logger.info("🔄 Persistent async event loop started")
+    
+    return _async_loop
+
+def run_async(coro):
+    """Run coroutine on the persistent event loop."""
+    loop = get_async_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=30)  # 30 second timeout
+
+# ------------------------------------------------------------------
 # LAZY METAAPI INITIALIZATION
 # ------------------------------------------------------------------
 _metaapi_instance = None
@@ -50,26 +79,25 @@ def get_metaapi():
 # GLOBAL CONNECTION CACHE
 # ------------------------------------------------------------------
 connections = {}
-connection_lock = asyncio.Lock()
+connection_lock = threading.Lock()
 
 async def get_connection(account_id):
-    async with connection_lock:
-        if account_id in connections:
-            # Skip .connected check - just reuse
-            return connections[account_id]
+    # Note: No asyncio.Lock needed since we're on a single loop thread
+    if account_id in connections:
+        return connections[account_id]
 
-        logger.info(f"🔌 Establishing new connection for account {account_id}")
-        api = get_metaapi()
-        account = await api.metatrader_account_api.get_account(account_id)
-        if account.state != "DEPLOYED":
-            logger.info(f"⏳ Deploying account {account_id}...")
-            await account.deploy()
-            await account.wait_connected()
-        connection = account.get_rpc_connection()
-        await connection.connect()
-        await connection.wait_synchronized()
-        connections[account_id] = connection
-        return connection
+    logger.info(f"🔌 Establishing new connection for account {account_id}")
+    api = get_metaapi()
+    account = await api.metatrader_account_api.get_account(account_id)
+    if account.state != "DEPLOYED":
+        logger.info(f"⏳ Deploying account {account_id}...")
+        await account.deploy()
+        await account.wait_connected()
+    connection = account.get_rpc_connection()
+    await connection.connect()
+    await connection.wait_synchronized()
+    connections[account_id] = connection
+    return connection
 
 # ------------------------------------------------------------------
 # ADAPTIVE LOT SIZING
@@ -142,7 +170,6 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
 
         results = []
         for idx, tp in enumerate(tp_levels):
-            # FIX: Remove client_id parameter - not supported by create_market_buy_order
             if action.lower() == "buy":
                 result = await connection.create_market_buy_order(
                     symbol, volume_per_tp,
@@ -167,9 +194,7 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
             if isinstance(result, dict):
                 pos_id = result.get('positionId')
 
-            # Generate our own tracking ID for the position manager
-            tracking_id = f"bot_{symbol}_{int(time.time() * 1000)}_{idx}"
-            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id, "trackingId": tracking_id})
+            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id})
             logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volume_per_tp} | PosID: {pos_id}")
 
         logger.info(f"✅ {action.upper()} total {final_volume} {symbol} split into {num_tps} positions")
@@ -209,7 +234,7 @@ async def get_symbol_atr(connection, symbol):
         return 0.0001
 
 # ------------------------------------------------------------------
-# POSITION MANAGER
+# POSITION MANAGER (runs on persistent loop)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
@@ -220,13 +245,8 @@ async def position_manager_loop(account_id):
         try:
             connection = await get_connection(account_id)
             positions = await connection.get_positions()
-            if not positions:
-                await asyncio.sleep(5)
-                continue
-
+            
             for pos in positions:
-                # FIX: Since clientId isn't supported, manage ALL positions on this symbol
-                # Or filter by magic number if available
                 symbol = pos['symbol']
                 position_id = pos['id']
                 entry = pos['openPrice']
@@ -285,28 +305,11 @@ async def position_manager_loop(account_id):
             logger.error(f"❌ Position manager error: {e}")
             await asyncio.sleep(10)
 
-# ------------------------------------------------------------------
-# BACKGROUND THREAD FOR POSITION MANAGER
-# ------------------------------------------------------------------
 def start_position_manager(account_id):
-    def run_manager():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(position_manager_loop(account_id))
-    thread = threading.Thread(target=run_manager, daemon=True)
-    thread.start()
-    logger.info(f"🧵 Position manager thread started for account {account_id}")
-
-# ------------------------------------------------------------------
-# ASYNC WRAPPER FOR FLASK
-# ------------------------------------------------------------------
-def run_async(coro):
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Start position manager on the persistent event loop."""
+    loop = get_async_loop()
+    asyncio.run_coroutine_threadsafe(position_manager_loop(account_id), loop)
+    logger.info(f"🧵 Position manager scheduled for account {account_id}")
 
 # ------------------------------------------------------------------
 # HEALTH CHECK ENDPOINTS
@@ -381,6 +384,10 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Starting Quantum Bot V.04 on port {port}")
 
+    # Start persistent event loop
+    get_async_loop()
+
+    # Start position managers
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
     if FRIEND_ACC_ID and FRIEND_ACC_ID != MY_ACC_ID:
