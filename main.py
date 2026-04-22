@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv('META_API_TOKEN')
 MY_ACC_ID = os.getenv('MY_ACCOUNT_ID')
 FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
-SYMBOL_SUFFIX = os.getenv('SYMBOL_SUFFIX', 'm')  # e.g., 'm' for Exness
+SYMBOL_SUFFIX = os.getenv('SYMBOL_SUFFIX', 'm')
 
-# Risk management settings (can be moved to env vars)
-BREAKEVEN_TRIGGER_ATR_MULT = 1.0   # Move SL to breakeven when profit >= 1x ATR
-TRAILING_START_ATR_MULT = 1.5      # Start trailing when profit >= 1.5x ATR
-TRAILING_DISTANCE_ATR_MULT = 0.5   # Trail distance = 0.5x ATR
+# Risk management settings
+BREAKEVEN_TRIGGER_ATR_MULT = 1.0
+TRAILING_START_ATR_MULT = 1.5
+TRAILING_DISTANCE_ATR_MULT = 0.5
 
 if not TOKEN:
     logger.error("❌ META_API_TOKEN is not set")
@@ -33,14 +33,27 @@ if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
 # ------------------------------------------------------------------
-# GLOBAL METAAPI CONNECTION CACHE
+# LAZY METAAPI INITIALIZATION (Fixes "no running event loop" error)
 # ------------------------------------------------------------------
-metaapi = MetaApi(TOKEN)
+_metaapi_instance = None
+_metaapi_lock = threading.Lock()
+
+def get_metaapi():
+    """Return a singleton MetaApi instance, created lazily."""
+    global _metaapi_instance
+    if _metaapi_instance is None:
+        with _metaapi_lock:
+            if _metaapi_instance is None:
+                _metaapi_instance = MetaApi(TOKEN)
+    return _metaapi_instance
+
+# ------------------------------------------------------------------
+# GLOBAL CONNECTION CACHE
+# ------------------------------------------------------------------
 connections = {}
 connection_lock = asyncio.Lock()
 
 async def get_connection(account_id):
-    """Return a cached, synchronized RPC connection."""
     async with connection_lock:
         if account_id in connections:
             conn = connections[account_id]
@@ -50,7 +63,8 @@ async def get_connection(account_id):
                 del connections[account_id]
 
         logger.info(f"🔌 Establishing new connection for account {account_id}")
-        account = await metaapi.metatrader_account_api.get_account(account_id)
+        api = get_metaapi()
+        account = await api.metatrader_account_api.get_account(account_id)
         if account.state != "DEPLOYED":
             logger.info(f"⏳ Deploying account {account_id}...")
             await account.deploy()
@@ -128,11 +142,10 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
 
         num_tps = len(tp_levels)
         volume_per_tp = final_volume / num_tps
-        volume_per_tp = max(0.01, round(volume_per_tp, 2))  # safe rounding
+        volume_per_tp = max(0.01, round(volume_per_tp, 2))
 
         results = []
         for idx, tp in enumerate(tp_levels):
-            # Unique clientId to identify bot trades
             client_id = f"bot_{symbol}_{int(time.time() * 1000)}_{idx}"
 
             if action.lower() == "buy":
@@ -150,7 +163,6 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
                     client_id=client_id
                 )
 
-            # Safely extract position ID
             pos_id = None
             if isinstance(result, list) and len(result) > 0:
                 result = result[0]
@@ -173,13 +185,12 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
         return {"error": str(e)}
 
 # ------------------------------------------------------------------
-# ATR CACHE (refreshed every 60 seconds)
+# ATR CACHE
 # ------------------------------------------------------------------
-atr_cache = {}          # symbol -> {'value': float, 'timestamp': float}
-ATR_CACHE_TTL = 60      # seconds
+atr_cache = {}
+ATR_CACHE_TTL = 60
 
 async def get_symbol_atr(connection, symbol):
-    """Return ATR for symbol, using cache if fresh."""
     now = time.time()
     if symbol in atr_cache and (now - atr_cache[symbol]['timestamp']) < ATR_CACHE_TTL:
         return atr_cache[symbol]['value']
@@ -200,18 +211,15 @@ async def get_symbol_atr(connection, symbol):
         return atr
     except Exception as e:
         logger.warning(f"ATR fetch failed for {symbol}: {e}")
-        return 0.0001  # fallback
+        return 0.0001
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (Breakeven, Trailing Stop)
+# POSITION MANAGER
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
-    """Runs indefinitely to manage open positions."""
     logger.info(f"🔄 Position manager started for account {account_id}")
-
-    # State tracking to avoid repeated modifications
-    breakeven_done = set()       # position IDs that already moved to BE
-    trail_updated = {}           # position_id -> last_trail_price
+    breakeven_done = set()
+    trail_updated = {}
 
     while True:
         try:
@@ -222,7 +230,6 @@ async def position_manager_loop(account_id):
                 continue
 
             for pos in positions:
-                # Only manage positions created by this bot
                 client_id = pos.get('clientId', '')
                 if not client_id.startswith('bot_'):
                     continue
@@ -234,45 +241,39 @@ async def position_manager_loop(account_id):
                 current_price = pos['currentPrice']
                 pos_type = pos['type']
 
-                # Determine pip value (forex)
                 pip_value = 0.0001 if 'JPY' not in symbol else 0.01
 
-                # Calculate profit in pips
                 if pos_type == 'POSITION_TYPE_BUY':
                     profit_pips = (current_price - entry) / pip_value
                 else:
                     profit_pips = (entry - current_price) / pip_value
 
-                # Get ATR
                 atr = await get_symbol_atr(connection, symbol)
                 atr_pips = atr / pip_value
 
-                # --- BREAKEVEN LOGIC (with buffer and one-time execution) ---
+                # Breakeven
                 be_trigger_pips = atr_pips * BREAKEVEN_TRIGGER_ATR_MULT
                 if profit_pips >= be_trigger_pips and position_id not in breakeven_done:
-                    buffer = 2 * pip_value   # small buffer to avoid spread whipsaw
+                    buffer = 2 * pip_value
                     if pos_type == 'POSITION_TYPE_BUY':
                         new_sl = entry + buffer
                     else:
                         new_sl = entry - buffer
 
-                    # Only move if it improves the SL
                     if (pos_type == 'POSITION_TYPE_BUY' and new_sl > current_sl) or \
                        (pos_type == 'POSITION_TYPE_SELL' and new_sl < current_sl):
                         await connection.update_position(position_id, {'stopLoss': new_sl})
                         logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
                         breakeven_done.add(position_id)
 
-                # --- TRAILING STOP LOGIC ---
+                # Trailing
                 trail_start_pips = atr_pips * TRAILING_START_ATR_MULT
                 trail_distance_pips = atr_pips * TRAILING_DISTANCE_ATR_MULT
                 if profit_pips >= trail_start_pips:
                     trail_distance_price = trail_distance_pips * pip_value
                     if pos_type == 'POSITION_TYPE_BUY':
                         new_sl = current_price - trail_distance_price
-                        # Only update if new SL is higher than current SL
                         if new_sl > current_sl:
-                            # Avoid updating if change is less than 0.5 pips
                             if position_id not in trail_updated or abs(new_sl - trail_updated[position_id]) > pip_value * 0.5:
                                 await connection.update_position(position_id, {'stopLoss': new_sl})
                                 logger.info(f"📈 Trailing: SL of {position_id} moved to {new_sl}")
@@ -285,7 +286,7 @@ async def position_manager_loop(account_id):
                                 logger.info(f"📉 Trailing: SL of {position_id} moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
 
-            await asyncio.sleep(5)  # Check every 5 seconds
+            await asyncio.sleep(5)
 
         except Exception as e:
             logger.error(f"❌ Position manager error: {e}")
@@ -295,7 +296,6 @@ async def position_manager_loop(account_id):
 # BACKGROUND THREAD FOR POSITION MANAGER
 # ------------------------------------------------------------------
 def start_position_manager(account_id):
-    """Launch the position manager in a separate thread."""
     def run_manager():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -388,7 +388,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Starting Quantum Bot V.04 on port {port}")
 
-    # Start position manager(s) in background threads
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
     if FRIEND_ACC_ID and FRIEND_ACC_ID != MY_ACC_ID:
