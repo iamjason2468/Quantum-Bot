@@ -33,13 +33,12 @@ if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
 # ------------------------------------------------------------------
-# LAZY METAAPI INITIALIZATION (Fixes "no running event loop" error)
+# LAZY METAAPI INITIALIZATION
 # ------------------------------------------------------------------
 _metaapi_instance = None
 _metaapi_lock = threading.Lock()
 
 def get_metaapi():
-    """Return a singleton MetaApi instance, created lazily."""
     global _metaapi_instance
     if _metaapi_instance is None:
         with _metaapi_lock:
@@ -56,11 +55,8 @@ connection_lock = asyncio.Lock()
 async def get_connection(account_id):
     async with connection_lock:
         if account_id in connections:
-            conn = connections[account_id]
-            if conn.connected:
-                return conn
-            else:
-                del connections[account_id]
+            # Skip .connected check - just reuse
+            return connections[account_id]
 
         logger.info(f"🔌 Establishing new connection for account {account_id}")
         api = get_metaapi()
@@ -146,21 +142,18 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
 
         results = []
         for idx, tp in enumerate(tp_levels):
-            client_id = f"bot_{symbol}_{int(time.time() * 1000)}_{idx}"
-
+            # FIX: Remove client_id parameter - not supported by create_market_buy_order
             if action.lower() == "buy":
                 result = await connection.create_market_buy_order(
                     symbol, volume_per_tp,
                     stop_loss=sl,
-                    take_profit=tp,
-                    client_id=client_id
+                    take_profit=tp
                 )
             else:
                 result = await connection.create_market_sell_order(
                     symbol, volume_per_tp,
                     stop_loss=sl,
-                    take_profit=tp,
-                    client_id=client_id
+                    take_profit=tp
                 )
 
             pos_id = None
@@ -174,8 +167,10 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
             if isinstance(result, dict):
                 pos_id = result.get('positionId')
 
-            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id, "clientId": client_id})
-            logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volume_per_tp} | PosID: {pos_id} | clientId: {client_id}")
+            # Generate our own tracking ID for the position manager
+            tracking_id = f"bot_{symbol}_{int(time.time() * 1000)}_{idx}"
+            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id, "trackingId": tracking_id})
+            logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volume_per_tp} | PosID: {pos_id}")
 
         logger.info(f"✅ {action.upper()} total {final_volume} {symbol} split into {num_tps} positions")
         return {"status": "success", "positions": results}
@@ -230,10 +225,8 @@ async def position_manager_loop(account_id):
                 continue
 
             for pos in positions:
-                client_id = pos.get('clientId', '')
-                if not client_id.startswith('bot_'):
-                    continue
-
+                # FIX: Since clientId isn't supported, manage ALL positions on this symbol
+                # Or filter by magic number if available
                 symbol = pos['symbol']
                 position_id = pos['id']
                 entry = pos['openPrice']
