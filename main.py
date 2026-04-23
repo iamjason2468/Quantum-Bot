@@ -23,6 +23,7 @@ TOKEN = os.getenv('META_API_TOKEN')
 MY_ACC_ID = os.getenv('MY_ACCOUNT_ID')
 FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'quantum-gold-2026')
 
 # Lot size control
 LOT_MULTIPLIER = float(os.getenv('LOT_MULTIPLIER', '0.3'))
@@ -33,7 +34,7 @@ GOLD_TRAIL_START = float(os.getenv('GOLD_TRAIL_START', '1.0'))
 GOLD_TRAIL_DIST = float(os.getenv('GOLD_TRAIL_DIST', '0.4'))
 
 # Safety filters
-MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '40'))
+MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '10'))  # 10 real pips
 
 # Rolling loss limit
 MAX_LOSS_LOOKBACK_MINUTES = int(os.getenv('MAX_LOSS_LOOKBACK_MINUTES', '120'))
@@ -55,6 +56,7 @@ logger.info(f"🛡️ Rolling Loss Limit: {MAX_LOSS_PCT}% over {MAX_LOSS_LOOKBAC
 logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips")
 logger.info(f"🪙 Gold BE: {GOLD_BE_ATR} ATR | Trail Start: {GOLD_TRAIL_START} | Trail Dist: {GOLD_TRAIL_DIST}")
 logger.info(f"🪙 Remove TP after TP1: {GOLD_REMOVE_TP_AFTER_TP1}")
+logger.info(f"🔐 Webhook Security: {'ENABLED' if WEBHOOK_SECRET else 'DISABLED'}")
 
 # ------------------------------------------------------------------
 # TRACKING STATE
@@ -62,11 +64,12 @@ logger.info(f"🪙 Remove TP after TP1: {GOLD_REMOVE_TP_AFTER_TP1}")
 last_trade_price = {}
 trade_history = deque()
 cooldown_until = None
+window_start_balance = {}
 
 # ------------------------------------------------------------------
 # HELPER FUNCTIONS
 # ------------------------------------------------------------------
-PIP_VALUE = 0.01  # Gold: 1 pip = $0.10 (10 points)
+PIP_VALUE = 0.1  # Gold: 1 pip = $0.10
 
 def get_pip_value(symbol=""):
     return PIP_VALUE
@@ -92,12 +95,22 @@ def record_trade_result(pnl_amount):
     cutoff = datetime.utcnow() - timedelta(minutes=MAX_LOSS_LOOKBACK_MINUTES)
     while trade_history and trade_history[0][0] < cutoff:
         trade_history.popleft()
+    # Clean up old balance snapshots
+    for key in list(window_start_balance.keys()):
+        key_dt = datetime.strptime(key, '%Y-%m-%d %H:%M')
+        if key_dt < cutoff:
+            del window_start_balance[key]
 
 def get_rolling_pnl_pct(current_balance):
     if not trade_history or current_balance <= 0:
         return 0.0
+    window_start = trade_history[0][0]
+    key = window_start.strftime('%Y-%m-%d %H:%M')
+    if key not in window_start_balance:
+        window_start_balance[key] = current_balance - sum(pnl for _, pnl in trade_history)
+    start_bal = window_start_balance[key]
     total_pnl = sum(pnl for _, pnl in trade_history)
-    return (total_pnl / current_balance) * 100
+    return (total_pnl / start_bal) * 100 if start_bal > 0 else 0.0
 
 def is_in_cooldown():
     global cooldown_until
@@ -314,7 +327,7 @@ async def position_manager_loop(account_id):
     breakeven_done = set()
     trail_updated = {}
     tp1_hit_tracking = set()
-    tp_removed = set()  # Track positions that had TP removed
+    tp_removed = set()
 
     while True:
         try:
@@ -476,14 +489,16 @@ def ping():
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({"service": "Quantum Bot Gold V.08", "status": "online"}), 200
+    return jsonify({"service": "Quantum Bot Gold V.09", "status": "online"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.json
-        if not data:
-            return jsonify({"status": "error", "message": "No JSON data"}), 400
+        if not data or data.get('passphrase') != WEBHOOK_SECRET:
+            logger.warning("🔐 Unauthorized webhook attempt blocked")
+            return jsonify({"status": "unauthorized"}), 401
+
         logger.info(f"📨 Received signal: {data}")
 
         user = data.get("user_id", "ME")
@@ -544,7 +559,7 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot Gold V.08 on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot Gold V.09 on port {port}")
     get_async_loop()
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
