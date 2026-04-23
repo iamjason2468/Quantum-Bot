@@ -4,7 +4,8 @@ import logging
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import deque
 from flask import Flask, request, jsonify
 from metaapi_cloud_sdk import MetaApi
 
@@ -27,7 +28,7 @@ GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')
 # Lot size control
 LOT_MULTIPLIER = float(os.getenv('LOT_MULTIPLIER', '0.3'))
 
-# Risk parameters (can override via env)
+# Risk parameters
 FOREX_BE_ATR = float(os.getenv('FOREX_BE_ATR', '1.0'))
 FOREX_TRAIL_START = float(os.getenv('FOREX_TRAIL_START', '1.5'))
 FOREX_TRAIL_DIST = float(os.getenv('FOREX_TRAIL_DIST', '0.5'))
@@ -37,9 +38,13 @@ GOLD_TRAIL_START = float(os.getenv('GOLD_TRAIL_START', '1.0'))
 GOLD_TRAIL_DIST = float(os.getenv('GOLD_TRAIL_DIST', '0.5'))
 
 # Safety filters
-MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '50'))
-MIN_DISTANCE_PIPS_FOREX = float(os.getenv('MIN_DISTANCE_PIPS_FOREX', '10'))
-DAILY_MAX_LOSS_PCT = float(os.getenv('DAILY_MAX_LOSS_PCT', '5.0'))
+MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '40'))
+MIN_DISTANCE_PIPS_FOREX = float(os.getenv('MIN_DISTANCE_PIPS_FOREX', '8'))
+
+# Rolling loss limit (scalper-friendly)
+MAX_LOSS_LOOKBACK_MINUTES = int(os.getenv('MAX_LOSS_LOOKBACK_MINUTES', '120'))
+MAX_LOSS_PCT = float(os.getenv('MAX_LOSS_PCT', '3.0'))
+COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '30'))
 
 # Gold-specific: force BE when near TP1
 GOLD_FORCE_BE_AT_TP1 = os.getenv('GOLD_FORCE_BE_AT_TP1', 'true').lower() == 'true'
@@ -51,15 +56,15 @@ if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
 logger.info(f"📊 Lot Multiplier: {LOT_MULTIPLIER}x")
-logger.info(f"🛡️ Daily Max Loss: {DAILY_MAX_LOSS_PCT}%")
+logger.info(f"🛡️ Rolling Loss Limit: {MAX_LOSS_PCT}% over {MAX_LOSS_LOOKBACK_MINUTES}min (Cooldown: {COOLDOWN_MINUTES}min)")
 logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips, Forex {MIN_DISTANCE_PIPS_FOREX} pips")
 
 # ------------------------------------------------------------------
 # TRACKING STATE
 # ------------------------------------------------------------------
 last_trade_price = {}          # symbol_direction -> price
-daily_start_balance = {}       # account_date -> balance
-daily_pnl = {}                 # account_date -> pnl
+trade_history = deque()        # (timestamp, pnl_amount)
+cooldown_until = None          # datetime when cooldown ends
 
 # ------------------------------------------------------------------
 # HELPER FUNCTIONS
@@ -82,18 +87,6 @@ def get_risk_multipliers(symbol):
     else:
         return (FOREX_BE_ATR, FOREX_TRAIL_START, FOREX_TRAIL_DIST)
 
-def check_daily_loss_limit(account_id, current_balance):
-    today = datetime.utcnow().strftime('%Y-%m-%d')
-    key = f"{account_id}_{today}"
-    if key not in daily_start_balance:
-        daily_start_balance[key] = current_balance
-    pnl = current_balance - daily_start_balance[key]
-    pnl_pct = (pnl / daily_start_balance[key]) * 100 if daily_start_balance[key] > 0 else 0
-    if pnl_pct <= -DAILY_MAX_LOSS_PCT:
-        logger.warning(f"🛑 Daily loss limit reached: {pnl_pct:.2f}% (Limit: {DAILY_MAX_LOSS_PCT}%)")
-        return False
-    return True
-
 def can_trade(symbol, current_price, direction):
     key = f"{symbol}_{direction}"
     if key not in last_trade_price:
@@ -107,6 +100,51 @@ def can_trade(symbol, current_price, direction):
     else:
         logger.info(f"⛔ Signal blocked: Only {distance_pips:.1f} pips from last {direction} trade. Need {min_distance}")
         return False
+
+def record_trade_result(pnl_amount):
+    """Record a trade result for rolling loss calculation."""
+    trade_history.append((datetime.utcnow(), pnl_amount))
+    cutoff = datetime.utcnow() - timedelta(minutes=MAX_LOSS_LOOKBACK_MINUTES)
+    while trade_history and trade_history[0][0] < cutoff:
+        trade_history.popleft()
+
+def get_rolling_pnl_pct(current_balance):
+    """Return rolling P&L as percentage of current balance."""
+    if not trade_history or current_balance <= 0:
+        return 0.0
+    total_pnl = sum(pnl for _, pnl in trade_history)
+    return (total_pnl / current_balance) * 100
+
+def is_in_cooldown():
+    """Return True if currently in cooldown period."""
+    global cooldown_until
+    if cooldown_until is None:
+        return False
+    if datetime.utcnow() < cooldown_until:
+        remaining = (cooldown_until - datetime.utcnow()).seconds // 60
+        logger.info(f"⏸️ In cooldown: {remaining} minutes remaining")
+        return True
+    else:
+        cooldown_until = None
+        logger.info("✅ Cooldown ended — resuming trading")
+        return False
+
+def check_rolling_loss_limit(current_balance):
+    """Return False if loss limit exceeded and should pause trading."""
+    global cooldown_until
+    
+    if is_in_cooldown():
+        return False
+    
+    rolling_pnl_pct = get_rolling_pnl_pct(current_balance)
+    
+    if rolling_pnl_pct <= -MAX_LOSS_PCT:
+        logger.warning(f"🛑 Rolling loss limit reached: {rolling_pnl_pct:.2f}% (Limit: {MAX_LOSS_PCT}%)")
+        cooldown_until = datetime.utcnow() + timedelta(minutes=COOLDOWN_MINUTES)
+        logger.warning(f"⏸️ Entering cooldown for {COOLDOWN_MINUTES} minutes")
+        return False
+    
+    return True
 
 # ------------------------------------------------------------------
 # LAZY METAAPI INITIALIZATION
@@ -490,8 +528,8 @@ def webhook():
 
         connection = run_async(get_connection(target_id))
         balance = run_async(fetch_account_balance(target_id))
-        if balance is not None and not check_daily_loss_limit(target_id, balance):
-            return jsonify({"status": "blocked", "reason": "daily_loss_limit"}), 200
+        if balance is not None and not check_rolling_loss_limit(balance):
+            return jsonify({"status": "blocked", "reason": "rolling_loss_limit"}), 200
 
         volume = float(data.get('volume', 0.01))
         use_adaptive = data.get('adaptive', True)
