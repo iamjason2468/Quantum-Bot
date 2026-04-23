@@ -62,9 +62,9 @@ logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips, Forex {MIN_
 # ------------------------------------------------------------------
 # TRACKING STATE
 # ------------------------------------------------------------------
-last_trade_price = {}          # symbol_direction -> price
-trade_history = deque()        # (timestamp, pnl_amount)
-cooldown_until = None          # datetime when cooldown ends
+last_trade_price = {}
+trade_history = deque()
+cooldown_until = None
 
 # ------------------------------------------------------------------
 # HELPER FUNCTIONS
@@ -102,21 +102,18 @@ def can_trade(symbol, current_price, direction):
         return False
 
 def record_trade_result(pnl_amount):
-    """Record a trade result for rolling loss calculation."""
     trade_history.append((datetime.utcnow(), pnl_amount))
     cutoff = datetime.utcnow() - timedelta(minutes=MAX_LOSS_LOOKBACK_MINUTES)
     while trade_history and trade_history[0][0] < cutoff:
         trade_history.popleft()
 
 def get_rolling_pnl_pct(current_balance):
-    """Return rolling P&L as percentage of current balance."""
     if not trade_history or current_balance <= 0:
         return 0.0
     total_pnl = sum(pnl for _, pnl in trade_history)
     return (total_pnl / current_balance) * 100
 
 def is_in_cooldown():
-    """Return True if currently in cooldown period."""
     global cooldown_until
     if cooldown_until is None:
         return False
@@ -130,24 +127,19 @@ def is_in_cooldown():
         return False
 
 def check_rolling_loss_limit(current_balance):
-    """Return False if loss limit exceeded and should pause trading."""
     global cooldown_until
-    
     if is_in_cooldown():
         return False
-    
     rolling_pnl_pct = get_rolling_pnl_pct(current_balance)
-    
     if rolling_pnl_pct <= -MAX_LOSS_PCT:
         logger.warning(f"🛑 Rolling loss limit reached: {rolling_pnl_pct:.2f}% (Limit: {MAX_LOSS_PCT}%)")
         cooldown_until = datetime.utcnow() + timedelta(minutes=COOLDOWN_MINUTES)
         logger.warning(f"⏸️ Entering cooldown for {COOLDOWN_MINUTES} minutes")
         return False
-    
     return True
 
 # ------------------------------------------------------------------
-# LAZY METAAPI INITIALIZATION
+# LAZY METAAPI INITIALIZATION (with region fix)
 # ------------------------------------------------------------------
 _metaapi_instance = None
 _metaapi_lock = threading.Lock()
@@ -157,7 +149,9 @@ def get_metaapi():
     if _metaapi_instance is None:
         with _metaapi_lock:
             if _metaapi_instance is None:
-                _metaapi_instance = MetaApi(TOKEN)
+                # FIX: Add region for better connection stability
+                _metaapi_instance = MetaApi(TOKEN, {'region': 'london'})
+                logger.info("🔧 MetaApi initialized with region: london")
     return _metaapi_instance
 
 # ------------------------------------------------------------------
@@ -300,7 +294,6 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
             results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id})
             logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volume_per_tp} | PosID: {pos_id}")
 
-        # Update last trade price for distance filter
         last_trade_price[f"{symbol}_{action.upper()}"] = entry
 
         logger.info(f"✅ {action.upper()} total {final_volume} {symbol} split into {num_tps} positions")
@@ -522,7 +515,6 @@ def webhook():
         action = data.get('action', 'buy').lower()
         entry = float(data.get('entry', 0))
 
-        # Safety checks
         if not can_trade(final_symbol, entry, action.upper()):
             return jsonify({"status": "blocked", "reason": "min_distance"}), 200
 
