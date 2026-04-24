@@ -832,42 +832,171 @@ def api_manager():
     return jsonify(groups)
 
 # ------------------------------------------------------------------
-# DASHBOARD HTML
+# DASHBOARD HTML (wrapped in {% raw %} to protect JavaScript)
 # ------------------------------------------------------------------
 
-DASHBOARD_HTML = """
-<!DOCTYPE html>
+DASHBOARD_HTML = """{% raw %}<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quantum Gold | Master Terminal</title>
     <style>
-        /* Same CSS as provided, unchanged */
+        :root {
+            --bg: #050505; --card-bg: #0f0f12; --border: #1f1f23;
+            --text-main: #ffffff; --text-dim: #88888e;
+            --accent-gold: #FFD700;
+            --accent-green: #00ffa3; --accent-red: #ff4d4d;
+            --accent-blue: #00d1ff; --accent-orange: #ff9f00;
+            --terminal-green: #00ff41;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background-color: var(--bg); color: var(--text-main); font-family: 'Inter', sans-serif; padding: 15px; overflow-x: hidden; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .logo { font-weight: 800; letter-spacing: -1px; font-size: 1.1rem; }
+        .logo span { color: var(--accent-gold); }
+        .status-container {
+            display: flex; align-items: center; gap: 10px;
+            background: rgba(255,215,0,0.05); padding: 6px 12px;
+            border-radius: 20px; border: 1px solid var(--border);
+        }
+        .pulse-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--accent-gold);
+            box-shadow: 0 0 10px var(--accent-gold);
+            animation: breath 2s infinite ease-in-out;
+        }
+        .pulse-stale { background: var(--accent-red) !important; box-shadow: 0 0 10px var(--accent-red) !important; }
+        @keyframes breath {
+            0%, 100% { opacity: 0.5; transform: scale(0.9); }
+            50% { opacity: 1; transform: scale(1.1); }
+        }
+        .nav-tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; overflow-x: auto; }
+        .tab { padding: 10px 15px; border-radius: 8px; cursor: pointer; color: var(--text-dim); font-size: 0.75rem; font-weight: 700; transition: 0.2s; text-transform: uppercase; white-space: nowrap; }
+        .tab.active { background: var(--card-bg); color: var(--accent-gold); border: 1px solid var(--border); }
+        .page { display: none; animation: fadeIn 0.3s ease; }
+        .page.active { display: block; }
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; }
+        .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 20px; }
+        .wide-card { grid-column: span 2; }
+        .card-label { color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+        .spread-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: var(--text-dim); border: 1px solid var(--border); }
+        .spread-high { color: var(--accent-red) !important; border-color: var(--accent-red) !important; background: rgba(255, 77, 77, 0.1) !important; }
+        .curve-container { margin: 10px 0; background: rgba(0,0,0,0.4); border-radius: 12px; padding: 15px; }
+        .sparkline { stroke: var(--accent-gold); stroke-width: 2.5; fill: transparent; filter: drop-shadow(0 0 8px rgba(255,215,0,0.4)); }
+        .stat-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #16161a; }
+        .stat-name { color: var(--text-dim); font-size: 0.85rem; }
+        .stat-value-sm { font-weight: 700; font-size: 0.9rem; }
+        .red-glow { background: var(--accent-red); box-shadow: 0 0 6px var(--accent-red); }
+        .green-glow { background: var(--accent-green); box-shadow: 0 0 6px var(--accent-green); }
+        .gray-dot { background: #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
+        th { text-align: left; color: var(--text-dim); padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+        td { padding: 12px 0; border-bottom: 1px solid #16161a; }
+        .price-tag { font-family: monospace; font-weight: bold; }
+        .console { background: #000; border: 1px solid #222; border-radius: 12px; height: 380px; overflow-y: auto; padding: 15px; font-family: monospace; font-size: 0.75rem; color: var(--terminal-green); line-height: 1.5; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        @media (max-width: 768px) { .wide-card { grid-column: span 1; } }
     </style>
 </head>
 <body>
-    <!-- Same HTML structure as provided, with IDs preserved -->
-    <!-- The JavaScript below replaces the simulated data with real API calls -->
+
+    <header>
+        <div class="logo">QUANTUM<span>GOLD</span></div>
+        <div class="status-container">
+            <div id="statusPulse" class="pulse-dot"></div>
+            <div style="display:flex; flex-direction:column;">
+                <span id="statusText" style="font-size: 10px; font-weight: 900; color:var(--accent-gold)">ENGINE LIVE</span>
+                <span style="font-size: 9px; color:var(--text-dim)" id="clock">00:00:00 UTC</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="nav-tabs">
+        <div class="tab active" onclick="switchTab('main-page')">Monitor</div>
+        <div class="tab" onclick="switchTab('analytics-page')">Analytics</div>
+        <div class="tab" onclick="switchTab('logs-page')">Logs</div>
+    </div>
+
+    <div id="main-page" class="page active">
+        <div class="dashboard-grid">
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div class="card-label">Equity Account</div>
+                    <div id="spreadDisplay" class="spread-badge">Spread: --</div>
+                </div>
+                <div style="font-size: 2rem; font-weight: 800;" id="balance">$---.--</div>
+                <div id="dailyPnL" style="color:var(--accent-green); font-size: 0.85rem; font-weight: 700;">Loading...</div>
+            </div>
+
+            <div class="card">
+                <div class="card-label" style="text-align: center;">System Status</div>
+                <div id="manager-info" style="font-size:0.7rem; color:var(--text-dim); margin-top:10px;">Loading...</div>
+            </div>
+
+            <div class="card wide-card">
+                <div class="card-label">Active Positions</div>
+                <table id="positions-table">
+                    <thead><tr><th>Ticket</th><th>Entry / Now</th><th>SL / TP</th><th>PnL</th></tr></thead>
+                    <tbody><tr><td colspan="4" style="color:var(--text-dim)">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="analytics-page" class="page">
+        <div class="dashboard-grid">
+            <div class="card wide-card">
+                <div class="card-label">Performance Summary</div>
+                <div id="analytics-content" style="color:var(--text-dim)">Loading...</div>
+            </div>
+            <div class="card wide-card">
+                <div class="card-label">Manager Groups</div>
+                <div id="manager-groups" style="font-size:0.7rem; color:var(--text-dim)">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="logs-page" class="page">
+        <div class="card">
+            <div class="card-label">Signal Log</div>
+            <div class="console" id="logConsole">
+                <div style="color:#555">Loading signals...</div>
+            </div>
+        </div>
+    </div>
 
     <script>
-        // Replace simulated data with API calls
         const API_BASE = window.location.origin;
+
+        function switchTab(id) {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+            event.currentTarget.classList.add('active');
+        }
+
+        function updateTime() {
+            var now = new Date();
+            document.getElementById('clock').innerText = now.toISOString().split('T')[1].split('.')[0] + ' UTC';
+        }
 
         async function fetchStatus() {
             try {
                 const res = await fetch(API_BASE + '/api/status');
                 const data = await res.json();
-                document.getElementById('statusPulse').classList.toggle('pulse-stale', !data.online);
-                document.getElementById('statusText').innerText = data.online ? 'ENGINE LIVE' : 'OFFLINE';
-                document.getElementById('statusText').style.color = data.online ? 'var(--accent-gold)' : 'var(--accent-red)';
-                document.getElementById('clock').innerText = data.time_utc.split(' ')[1] + ' UTC';
-                // Cooldown banner
-                if (data.cooldown) {
-                    showCooldownBanner();
+                const dot = document.getElementById('statusPulse');
+                const txt = document.getElementById('statusText');
+                if (data.online) {
+                    dot.classList.remove('pulse-stale');
+                    txt.innerText = 'ENGINE LIVE';
+                    txt.style.color = 'var(--accent-gold)';
                 } else {
-                    hideCooldownBanner();
+                    dot.classList.add('pulse-stale');
+                    txt.innerText = 'OFFLINE';
+                    txt.style.color = 'var(--accent-red)';
                 }
+                updateTime();
             } catch(e) { console.error(e); }
         }
 
@@ -876,14 +1005,10 @@ DASHBOARD_HTML = """
                 const res = await fetch(API_BASE + '/api/account');
                 const data = await res.json();
                 document.getElementById('balance').innerText = '$' + data.balance.toFixed(2);
-                const pnlEl = document.querySelector('.card .stat-value-sm') || document.getElementById('balance').nextElementSibling;
-                // Update daily P&L display
-                const pnlText = (data.daily_pnl_dollar >= 0 ? '+' : '') + '$' + data.daily_pnl_dollar.toFixed(2) + ' Today';
-                const pnlColor = data.daily_pnl_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
-                if (document.getElementById('dailyPnL')) {
-                    document.getElementById('dailyPnL').innerText = pnlText;
-                    document.getElementById('dailyPnL').style.color = pnlColor;
-                }
+                const pnlEl = document.getElementById('dailyPnL');
+                const pnlText = (data.daily_pnl_dollar >= 0 ? '+' : '') + '$' + data.daily_pnl_dollar.toFixed(2) + ' Today (' + data.daily_pnl_percent.toFixed(2) + '%)';
+                pnlEl.innerText = pnlText;
+                pnlEl.style.color = data.daily_pnl_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
             } catch(e) { console.error(e); }
         }
 
@@ -891,17 +1016,20 @@ DASHBOARD_HTML = """
             try {
                 const res = await fetch(API_BASE + '/api/positions');
                 const positions = await res.json();
-                const tbody = document.querySelector('#positions-table tbody') || document.querySelector('table tbody');
-                if (!tbody) return;
+                const tbody = document.querySelector('#positions-table tbody');
                 tbody.innerHTML = '';
+                if (positions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-dim)">No open positions</td></tr>';
+                    return;
+                }
                 positions.forEach(pos => {
                     const row = tbody.insertRow();
-                    row.innerHTML = `
-                        <td>#${pos.positionId}<br><b style="color:${pos.type === 'BUY' ? 'var(--accent-green)' : 'var(--accent-red)'}">${pos.type} ${pos.volume}</b></td>
+                    const typeColor = pos.type === 'BUY' ? 'var(--accent-green)' : 'var(--accent-red)';
+                    const profitColor = pos.profit_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                    row.innerHTML = `<td>#${pos.positionId}<br><b style="color:${typeColor}">${pos.type} ${pos.volume}</b></td>
                         <td><span class="price-tag">${pos.open_price}</span><br><small style="color:var(--text-dim)">${pos.current_price}</small></td>
                         <td><span style="color:var(--accent-red)">${pos.sl}</span> / <span style="color:var(--accent-green)">${pos.tp === 0 ? 'TRAIL' : pos.tp}</span></td>
-                        <td style="color:${pos.profit_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}; font-weight:bold;">${pos.profit_dollar >= 0 ? '+' : ''}$${pos.profit_dollar.toFixed(2)}</td>
-                    `;
+                        <td style="color:${profitColor}; font-weight:bold;">${pos.profit_dollar >= 0 ? '+' : ''}$${pos.profit_dollar.toFixed(2)}</td>`;
                 });
             } catch(e) { console.error(e); }
         }
@@ -925,14 +1053,17 @@ DASHBOARD_HTML = """
                 const res = await fetch(API_BASE + '/api/signals');
                 const signals = await res.json();
                 const consoleEl = document.getElementById('logConsole');
-                if (!consoleEl) return;
                 consoleEl.innerHTML = '';
+                if (signals.length === 0) {
+                    consoleEl.innerHTML = '<div style="color:#555">No signals yet</div>';
+                    return;
+                }
                 signals.reverse().forEach(sig => {
                     const div = document.createElement('div');
                     div.className = 'log-entry';
                     let color = '#888';
                     if (sig.status === 'EXECUTED') color = 'var(--accent-green)';
-                    else if (sig.status.startsWith('BLOCKED')) color = 'var(--accent-red)';
+                    else if (sig.status.indexOf('BLOCKED') === 0) color = 'var(--accent-red)';
                     else if (sig.status === 'ERROR') color = 'var(--accent-orange)';
                     div.innerHTML = `<span style="color:#555">${sig.time}</span> [${sig.status}] ${sig.action} ${sig.symbol} @ ${sig.entry} ${sig.reason ? '('+sig.reason+')' : ''}`;
                     consoleEl.appendChild(div);
@@ -944,35 +1075,24 @@ DASHBOARD_HTML = """
             try {
                 const res = await fetch(API_BASE + '/api/manager');
                 const data = await res.json();
-                // Update position manager info on the dashboard
                 const managerInfo = document.getElementById('manager-info');
-                if (managerInfo) {
-                    let html = '';
-                    for (const [key, val] of Object.entries(data)) {
-                        html += `<div style="font-size:0.7rem; margin:2px 0">${key}: Force BE:${val.force_be_done} | TP Removed:${val.tp_removed} | Trail:${val.trailing_active}</div>`;
-                    }
-                    managerInfo.innerHTML = html || '<div style="color:var(--text-dim)">No active groups</div>';
+                const managerGroups = document.getElementById('manager-groups');
+                const keys = Object.keys(data);
+                if (keys.length === 0) {
+                    managerInfo.innerHTML = '<div style="color:var(--text-dim)">No active trade groups</div>';
+                    if (managerGroups) managerGroups.innerHTML = '<div style="color:var(--text-dim)">No active trade groups</div>';
+                    return;
                 }
+                let html = '';
+                keys.forEach(key => {
+                    const val = data[key];
+                    html += `<div style="margin:2px 0">${key}: Force BE:${val.force_be_done} | TP Removed:${val.tp_removed} | Trail:${val.trailing_active}</div>`;
+                });
+                managerInfo.innerHTML = html;
+                if (managerGroups) managerGroups.innerHTML = html;
             } catch(e) { console.error(e); }
         }
 
-        function showCooldownBanner() {
-            let banner = document.getElementById('cooldownBanner');
-            if (!banner) {
-                banner = document.createElement('div');
-                banner.id = 'cooldownBanner';
-                banner.style.cssText = 'background:var(--accent-red); color:#fff; text-align:center; padding:10px; margin-bottom:15px; border-radius:8px; font-weight:bold;';
-                document.body.insertBefore(banner, document.body.firstChild);
-            }
-            banner.innerText = '⏸️ BOT IN COOLDOWN - TRADING PAUSED';
-        }
-
-        function hideCooldownBanner() {
-            const banner = document.getElementById('cooldownBanner');
-            if (banner) banner.remove();
-        }
-
-        // Refresh all data every 10 seconds
         function refreshAll() {
             fetchStatus();
             fetchAccount();
@@ -982,13 +1102,13 @@ DASHBOARD_HTML = """
             fetchManager();
         }
 
-        // Initial load
+        updateTime();
+        setInterval(updateTime, 1000);
         refreshAll();
         setInterval(refreshAll, 10000);
     </script>
 </body>
-</html>
-"""
+</html>{% endraw %}"""
 
 @app.route('/dashboard', methods=['GET'])
 def dashboard():
