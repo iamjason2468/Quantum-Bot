@@ -17,6 +17,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
+# HELPERS (moved to top)
+# ------------------------------------------------------------------
+def clamp(v, lo, hi):
+    return max(lo, min(v, hi))
+
+# ------------------------------------------------------------------
 # ENVIRONMENT VARIABLES
 # ------------------------------------------------------------------
 TOKEN = os.getenv('META_API_TOKEN')
@@ -43,139 +49,106 @@ if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
 logger.info(f"📊 Lot Multiplier: {LOT_MULTIPLIER}x")
-logger.info(f"🛡️ Rolling Loss Limit: {MAX_LOSS_PCT}% over {MAX_LOSS_LOOKBACK_MINUTES}min (Cooldown: {COOLDOWN_MINUTES}min)")
+logger.info(f"🛡️ Daily Loss Limit: {MAX_LOSS_PCT}% (Cooldown: {COOLDOWN_MINUTES}min)")
 logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips")
 logger.info(f"🪙 Gold BE: {GOLD_BE_ATR} ATR (baseline) | Trail Start: {GOLD_TRAIL_START} | Trail Dist: {GOLD_TRAIL_DIST}")
-logger.info(f"🪙 Adaptive risk scaling: ON (ER+ADX quality)")
+logger.info(f"🪙 Adaptive risk scaling: ON (Efficiency Ratio only)")
+
+# ------------------------------------------------------------------
+# PERSISTENT STATE
+# ------------------------------------------------------------------
+STATE_FILE = "bot_state.json"
+state_lock = threading.Lock()
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get("cooldown_until", None), data.get("daily_start_balance", {})
+        except:
+            pass
+    return None, {}
+
+def save_state(cooldown_until, daily_start_balance):
+    with open(STATE_FILE, 'w') as f:
+        json.dump({
+            "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+            "daily_start_balance": daily_start_balance
+        }, f)
 
 # ------------------------------------------------------------------
 # TRACKING STATE
 # ------------------------------------------------------------------
 last_trade_price = {}
-trade_history = deque()
+daily_start_balance = {}
 cooldown_until = None
-window_start_balance = {}
+
+# Load saved state
+loaded_cooldown, loaded_daily_bal = load_state()
+if loaded_cooldown:
+    try:
+        cooldown_until = datetime.fromisoformat(loaded_cooldown)
+    except:
+        pass
+daily_start_balance = loaded_daily_bal
 
 # ------------------------------------------------------------------
-# HELPER FUNCTIONS
+# PIP & RISK HELPERS
 # ------------------------------------------------------------------
-PIP_VALUE = 0.1  # Gold: 1 pip = $0.10
+PIP_VALUE = 0.1  # 1 pip = $0.10 for XAUUSD
 
 def get_pip_value(symbol=""):
     return PIP_VALUE
 
 def get_risk_multipliers(symbol=""):
-    """Return baseline multipliers; they will be scaled by trend quality."""
     return (GOLD_BE_ATR, GOLD_TRAIL_START, GOLD_TRAIL_DIST)
 
 def can_trade(symbol, current_price, direction):
-    key = f"{symbol}_{direction}"
-    if key not in last_trade_price:
-        return True
-    last_price = last_trade_price[key]
-    min_distance = MIN_DISTANCE_PIPS_GOLD
-    distance_pips = abs(current_price - last_price) / PIP_VALUE
-    if distance_pips >= min_distance:
-        return True
-    else:
-        logger.info(f"⛔ Signal blocked: Only {distance_pips:.1f} pips from last {direction} trade. Need {min_distance}")
-        return False
-
-def record_trade_result(pnl_amount):
-    trade_history.append((datetime.utcnow(), pnl_amount))
-    cutoff = datetime.utcnow() - timedelta(minutes=MAX_LOSS_LOOKBACK_MINUTES)
-    while trade_history and trade_history[0][0] < cutoff:
-        trade_history.popleft()
-    for key in list(window_start_balance.keys()):
-        key_dt = datetime.strptime(key, '%Y-%m-%d %H:%M')
-        if key_dt < cutoff:
-            del window_start_balance[key]
-
-def get_rolling_pnl_pct(current_balance):
-    if not trade_history or current_balance <= 0:
-        return 0.0
-    window_start = trade_history[0][0]
-    key = window_start.strftime('%Y-%m-%d %H:%M')
-    if key not in window_start_balance:
-        window_start_balance[key] = current_balance - sum(pnl for _, pnl in trade_history)
-    start_bal = window_start_balance[key]
-    total_pnl = sum(pnl for _, pnl in trade_history)
-    return (total_pnl / start_bal) * 100 if start_bal > 0 else 0.0
-
-def is_in_cooldown():
-    global cooldown_until
-    if cooldown_until is None:
-        return False
-    if datetime.utcnow() < cooldown_until:
-        remaining = (cooldown_until - datetime.utcnow()).seconds // 60
-        logger.info(f"⏸️ In cooldown: {remaining} minutes remaining")
-        return True
-    else:
-        cooldown_until = None
-        logger.info("✅ Cooldown ended — resuming trading")
-        return False
-
-def check_rolling_loss_limit(current_balance):
-    global cooldown_until
-    if is_in_cooldown():
-        return False
-    rolling_pnl_pct = get_rolling_pnl_pct(current_balance)
-    if rolling_pnl_pct <= -MAX_LOSS_PCT:
-        logger.warning(f"🛑 Rolling loss limit reached: {rolling_pnl_pct:.2f}% (Limit: {MAX_LOSS_PCT}%)")
-        cooldown_until = datetime.utcnow() + timedelta(minutes=COOLDOWN_MINUTES)
-        logger.warning(f"⏸️ Entering cooldown for {COOLDOWN_MINUTES} minutes")
-        return False
-    return True
-
-# ------------------------------------------------------------------
-# QUALITY-ADAPTIVE RISK SCALING
-# ------------------------------------------------------------------
-def calc_efficiency_ratio(high, low, close, length=20):
-    """Simple ER: net change / sum of absolute bar-to-bar changes."""
-    if len(high) < length + 1 or len(low) < length + 1:
-        return 0.5  # neutral
-    # Use last 'length' bars
-    change = abs(close[-1] - close[-length-1])
-    volatility = sum(abs(close[i] - close[i-1]) for i in range(-length, 0))
-    if volatility == 0:
-        return 0.0
-    return change / volatility
-
-async def get_trend_quality(connection, symbol, adx_value=None):
-    """Return a 0-1 quality score based on ER and ADX."""
-    try:
-        # Get 21 bars of 1m candles to compute ER (using 20-period window)
-        candles = await connection.get_candles(symbol, '1m', 21)
-        if candles and len(candles) >= 21:
-            highs = [c['high'] for c in candles]
-            lows = [c['low'] for c in candles]
-            closes = [c['close'] for c in candles]
-            er = calc_efficiency_ratio(highs, lows, closes, 20)
+    with state_lock:
+        key = f"{symbol}_{direction}"
+        if key not in last_trade_price:
+            return True
+        last_price = last_trade_price[key]
+        min_distance = MIN_DISTANCE_PIPS_GOLD
+        distance_pips = abs(current_price - last_price) / PIP_VALUE
+        if distance_pips >= min_distance:
+            return True
         else:
-            er = 0.5
-    except Exception as e:
-        logger.warning(f"Could not compute ER: {e}")
-        er = 0.5
+            logger.info(f"⛔ Signal blocked: Only {distance_pips:.1f} pips from last {direction} trade. Need {min_distance}")
+            return False
 
-    # Get ADX if not provided
-    if adx_value is None:
-        try:
-            # We can fetch ADX from MetaApi or use a cached value; for simplicity, we'll use a placeholder.
-            # In production, you could fetch the ADX from a separate indicator.
-            # For now, we'll use the ATR-cache approach but it's not ADX...
-            # We'll just use a default ADX of 25 if we can't get it.
-            pass
-        except:
-            adx_value = 25.0
+# ------------------------------------------------------------------
+# DAILY LOSS LIMIT (simplified)
+# ------------------------------------------------------------------
+def check_daily_loss_limit(current_balance):
+    global cooldown_until, daily_start_balance
+    with state_lock:
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        # Cooldown check
+        if cooldown_until and datetime.utcnow() < cooldown_until:
+            remaining = (cooldown_until - datetime.utcnow()).seconds // 60
+            logger.info(f"⏸️ In cooldown: {remaining} minutes remaining")
+            return False
+        if cooldown_until and datetime.utcnow() >= cooldown_until:
+            cooldown_until = None
+            logger.info("✅ Cooldown ended — resuming trading")
 
-    # Normalise ADX to 0..1 (25 = 0.5, 50 = 1.0)
-    adx_score = min(max((adx_value - 15) / 35.0, 0.0), 1.0)
-    # Blend ER and ADX
-    quality = 0.6 * er + 0.4 * adx_score
-    return clamp(quality, 0.1, 1.0)
+        # Set daily start balance if not set
+        if today_str not in daily_start_balance:
+            daily_start_balance = {today_str: current_balance}
+            logger.info(f"📅 New trading day – start balance: ${current_balance:.2f}")
+            save_state(cooldown_until, daily_start_balance)
+        start_bal = daily_start_balance[today_str]
+        drawdown_pct = ((current_balance - start_bal) / start_bal) * 100 if start_bal > 0 else 0
 
-def clamp(v, lo, hi):
-    return max(lo, min(v, hi))
+        if drawdown_pct <= -MAX_LOSS_PCT:
+            logger.warning(f"🛑 Daily loss limit reached: {drawdown_pct:.2f}% (Limit: {MAX_LOSS_PCT}%)")
+            cooldown_until = datetime.utcnow() + timedelta(minutes=COOLDOWN_MINUTES)
+            save_state(cooldown_until, daily_start_balance)
+            logger.warning(f"⏸️ Entering cooldown for {COOLDOWN_MINUTES} minutes")
+            return False
+        return True
 
 # ------------------------------------------------------------------
 # METAAPI INITIALIZATION
@@ -294,7 +267,7 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
                 logger.info(f"📊 Balance: ${balance:.2f} → Lot: {final_volume} (Gold)")
 
         tp_levels = [tp1, tp2, tp3]
-        if include_tp4:
+        if include_tp4 and tp4 > 0:
             tp_levels.append(tp4)
             logger.info(f"🔥 Trend Rider active: TP4 = {tp4}")
 
@@ -302,17 +275,31 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
         volume_per_tp = final_volume / num_tps
         volume_per_tp = max(0.01, round(volume_per_tp, 2))
 
+        # Adjust last TP volume to sum to final_volume
+        if num_tps > 1:
+            sum_first = volume_per_tp * (num_tps - 1)
+            last_volume = round(final_volume - sum_first, 2)
+            if last_volume < 0.01:
+                last_volume = 0.01
+            volumes = [volume_per_tp] * (num_tps - 1) + [last_volume]
+        else:
+            volumes = [volume_per_tp]
+
+        total_placed = sum(volumes)
+        if abs(total_placed - final_volume) > 0.02:
+            logger.warning(f"⚠️ Volume mismatch: intended {final_volume}, placed {total_placed}")
+
         results = []
         for idx, tp in enumerate(tp_levels):
             if action.lower() == "buy":
                 result = await connection.create_market_buy_order(
-                    symbol, volume_per_tp,
+                    symbol, volumes[idx],
                     stop_loss=sl,
                     take_profit=tp
                 )
             else:
                 result = await connection.create_market_sell_order(
-                    symbol, volume_per_tp,
+                    symbol, volumes[idx],
                     stop_loss=sl,
                     take_profit=tp
                 )
@@ -328,10 +315,11 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
             if isinstance(result, dict):
                 pos_id = result.get('positionId')
 
-            results.append({"tp": tp, "volume": volume_per_tp, "positionId": pos_id})
-            logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volume_per_tp} | PosID: {pos_id}")
+            results.append({"tp": tp, "volume": volumes[idx], "positionId": pos_id})
+            logger.info(f"   ➕ TP{idx+1} @ {tp} | Vol: {volumes[idx]} | PosID: {pos_id}")
 
-        last_trade_price[f"{symbol}_{action.upper()}"] = entry
+        with state_lock:
+            last_trade_price[f"{symbol}_{action.upper()}"] = entry
         logger.info(f"✅ {action.upper()} total {final_volume} {symbol} split into {num_tps} positions")
         return {"status": "success", "positions": results}
 
@@ -369,7 +357,34 @@ async def get_symbol_atr(connection, symbol):
         return 0.01
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (with grouping fix & adaptive risk scaling)
+# TREND QUALITY (Efficiency Ratio only)
+# ------------------------------------------------------------------
+def calc_efficiency_ratio(high, low, close, length=20):
+    if len(high) < length + 1 or len(low) < length + 1:
+        return 0.5
+    change = abs(close[-1] - close[-length-1])
+    volatility = sum(abs(close[i] - close[i-1]) for i in range(-length, 0))
+    if volatility == 0:
+        return 0.0
+    return change / volatility
+
+async def get_trend_quality(connection, symbol):
+    try:
+        candles = await connection.get_candles(symbol, '1m', 21)
+        if candles and len(candles) >= 21:
+            highs = [c['high'] for c in candles]
+            lows = [c['low'] for c in candles]
+            closes = [c['close'] for c in candles]
+            er = calc_efficiency_ratio(highs, lows, closes, 20)
+        else:
+            er = 0.5
+    except Exception as e:
+        logger.warning(f"Could not compute ER: {e}")
+        er = 0.5
+    return clamp(er, 0.1, 1.0)
+
+# ------------------------------------------------------------------
+# POSITION MANAGER (with all fixes)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
@@ -377,8 +392,7 @@ async def position_manager_loop(account_id):
     trail_updated = {}
     tp1_hit_tracking = set()
     tp_removed = set()
-
-    # Cache for trend quality per symbol to avoid too many calls
+    post_tp1_active = set()
     quality_cache = {}
 
     while True:
@@ -386,28 +400,44 @@ async def position_manager_loop(account_id):
             connection = await get_connection(account_id)
             positions = await connection.get_positions()
             if not positions:
+                # Clean up any stale sets when no positions exist
+                breakeven_done.clear()
+                trail_updated.clear()
+                tp1_hit_tracking.clear()
+                tp_removed.clear()
+                post_tp1_active.clear()
                 await asyncio.sleep(5)
                 continue
 
-            # === GROUPING FIX: round entry for gold ===
+            # Group by rounded entry
             trade_groups = {}
+            active_trade_keys = set()
             for pos in positions:
                 symbol = pos['symbol']
                 exact_entry = pos['openPrice']
-                # Group by entry rounded to 0 decimal places for gold
                 group_entry = round(exact_entry, 0) if 'XAU' in symbol.upper() else exact_entry
                 key = f"{symbol}_{group_entry}"
+                active_trade_keys.add(key)
                 if key not in trade_groups:
                     trade_groups[key] = []
                 trade_groups[key].append(pos)
 
-            # Get trend quality for each symbol (with caching)
+            # Clean up memory sets for trades no longer active
+            for key in list(tp1_hit_tracking):
+                if key not in active_trade_keys:
+                    tp1_hit_tracking.discard(key)
+            for key in list(post_tp1_active):
+                if key not in active_trade_keys:
+                    post_tp1_active.discard(key)
+            for key in list(tp_removed):
+                # tp_removed contains position IDs, ignore for now (minor)
+                pass
+
+            # Quality per symbol
             for symbol in set(pos['symbol'] for pos in positions):
                 if symbol not in quality_cache or (time.time() - quality_cache[symbol].get('ts', 0) > 60):
                     try:
-                        # Fetch a quick ADX approximation from ATR? Not accurate, so we'll use a default ADX.
-                        # Better: we can keep a running ADX from price movement, but for simplicity, use 25.
-                        quality = await get_trend_quality(connection, symbol, adx_value=25.0)
+                        quality = await get_trend_quality(connection, symbol)
                         quality_cache[symbol] = {'value': quality, 'ts': time.time()}
                     except:
                         quality = 1.0
@@ -417,24 +447,24 @@ async def position_manager_loop(account_id):
             for pos in positions:
                 symbol = pos['symbol']
                 position_id = pos['id']
-                entry = pos['openPrice']  # exact entry for profit calc
+                entry = pos['openPrice']
                 current_sl = pos.get('stopLoss', 0)
                 current_price = pos['currentPrice']
                 pos_type = pos['type']
                 take_profit = pos.get('takeProfit', 0)
 
-                # Adaptive baseline multipliers scaled by quality
                 be_base, trail_start_base, trail_dist_base = get_risk_multipliers()
-                # Quality scales the multipliers: higher quality → use full multipliers; lower → reduce
-                # We want to compress targets in bad quality.
                 scale = clamp(quality, 0.3, 1.0)
                 be_trigger_mult = be_base * scale
                 trail_start_mult = trail_start_base * scale
                 trail_dist_mult = trail_dist_base * scale
 
-                # Use the same rounded key for group lookups
                 group_entry = round(entry, 0)
                 trade_key = f"{symbol}_{group_entry}"
+
+                # If post-TP1, force immediate trailing
+                if trade_key in post_tp1_active:
+                    trail_start_mult = 0.0
 
                 if pos_type == 'POSITION_TYPE_BUY':
                     profit_pips = (current_price - entry) / PIP_VALUE
@@ -446,12 +476,12 @@ async def position_manager_loop(account_id):
                 atr = await get_symbol_atr(connection, symbol)
                 atr_pips = atr / PIP_VALUE
 
-                # --- Remove TP when approaching TP1 (same as before) ---
-                if GOLD_REMOVE_TP_AFTER_TP1 and trade_key not in tp1_hit_tracking:
+                # 1. TP1 approach block (only if force BE enabled)
+                if GOLD_FORCE_BE_AT_TP1 and GOLD_REMOVE_TP_AFTER_TP1 and trade_key not in tp1_hit_tracking:
                     tp1_distance = abs(tp1_price - current_price)
                     tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
                     if tp1_distance <= tp1_threshold:
-                        logger.info(f"🪙 TP1 approaching! Removing TPs from remaining positions")
+                        logger.info(f"🪙 TP1 approaching! Removing TPs, forcing BE, and activating immediate trailing")
                         for group_pos in trade_groups.get(trade_key, []):
                             if group_pos['id'] not in tp_removed and group_pos.get('takeProfit', 0) != tp1_price:
                                 try:
@@ -460,16 +490,8 @@ async def position_manager_loop(account_id):
                                     tp_removed.add(group_pos['id'])
                                 except Exception as e:
                                     logger.warning(f"Could not remove TP: {e}")
-                        tp1_hit_tracking.add(trade_key)
-
-                # --- Force BE near TP1 (uses quality-scaled buffer?) ---
-                if GOLD_FORCE_BE_AT_TP1 and trade_key not in tp1_hit_tracking:
-                    tp1_distance = abs(tp1_price - current_price)
-                    tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
-                    if tp1_distance <= tp1_threshold:
-                        for group_pos in trade_groups.get(trade_key, []):
                             if group_pos['id'] not in breakeven_done:
-                                buffer = 2 * PIP_VALUE  # can scale by quality if desired
+                                buffer = 3 * PIP_VALUE
                                 if pos_type == 'POSITION_TYPE_BUY':
                                     new_sl = entry + buffer
                                 else:
@@ -480,26 +502,28 @@ async def position_manager_loop(account_id):
                                     logger.info(f"🎯 Force BE: Moved SL of {group_pos['id']} to {new_sl}")
                                     breakeven_done.add(group_pos['id'])
                         tp1_hit_tracking.add(trade_key)
+                        post_tp1_active.add(trade_key)
 
-                # --- Adaptive Breakeven (capped at 70% SL) ---
-                sl_distance_pips = abs(entry - current_sl) / PIP_VALUE if current_sl else float('inf')
-                be_trigger_pips = min(
-                    atr_pips * be_trigger_mult,
-                    sl_distance_pips * 0.7
-                )
-                if profit_pips >= be_trigger_pips and position_id not in breakeven_done:
-                    buffer = 2 * PIP_VALUE
-                    if pos_type == 'POSITION_TYPE_BUY':
-                        new_sl = entry + buffer
-                    else:
-                        new_sl = entry - buffer
-                    if (pos_type == 'POSITION_TYPE_BUY' and new_sl > current_sl) or \
-                       (pos_type == 'POSITION_TYPE_SELL' and new_sl < current_sl):
-                        await connection.update_position(position_id, {'stopLoss': new_sl})
-                        logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
-                        breakeven_done.add(position_id)
+                # 2. Regular Breakeven (if not already forced)
+                if position_id not in breakeven_done:
+                    sl_distance_pips = abs(entry - current_sl) / PIP_VALUE if current_sl else float('inf')
+                    be_trigger_pips = min(
+                        atr_pips * be_trigger_mult,
+                        sl_distance_pips * 0.7
+                    )
+                    if profit_pips >= be_trigger_pips:
+                        buffer = 3 * PIP_VALUE
+                        if pos_type == 'POSITION_TYPE_BUY':
+                            new_sl = entry + buffer
+                        else:
+                            new_sl = entry - buffer
+                        if (pos_type == 'POSITION_TYPE_BUY' and new_sl > current_sl) or \
+                           (pos_type == 'POSITION_TYPE_SELL' and new_sl < current_sl):
+                            await connection.update_position(position_id, {'stopLoss': new_sl})
+                            logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
+                            breakeven_done.add(position_id)
 
-                # --- Adaptive Trailing ---
+                # 3. Trailing
                 trail_start_pips = atr_pips * trail_start_mult
                 trail_distance_pips = atr_pips * trail_dist_mult
                 if profit_pips >= trail_start_pips:
@@ -566,7 +590,7 @@ def ping():
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({"service": "Quantum Bot Gold V.09.2", "status": "online"}), 200
+    return jsonify({"service": "Quantum Bot Gold V.10.1", "status": "online"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -594,8 +618,11 @@ def webhook():
             return jsonify({"status": "blocked", "reason": "min_distance"}), 200
 
         balance = run_async(fetch_account_balance(target_id))
-        if balance is not None and not check_rolling_loss_limit(balance):
-            return jsonify({"status": "blocked", "reason": "rolling_loss_limit"}), 200
+        if balance is None:
+            logger.error("❌ Cannot fetch account balance – aborting trade")
+            return jsonify({"status": "error", "message": "Cannot fetch account balance"}), 500
+        if not check_daily_loss_limit(balance):
+            return jsonify({"status": "blocked", "reason": "daily_loss_limit"}), 200
 
         volume = float(data.get('volume', 0.01))
         use_adaptive = data.get('adaptive', True)
@@ -604,7 +631,7 @@ def webhook():
         tp2 = float(data.get('tp2', 0))
         tp3 = float(data.get('tp3', 0))
         tp4 = float(data.get('tp4', 0)) if 'tp4' in data else 0.0
-        include_tp4 = 'tp4' in data
+        include_tp4 = 'tp4' in data and tp4 > 0
         be_buffer = float(data.get('be_buffer', 0.0))
 
         logger.info(f"🪙 {final_symbol} | Entry: {entry}, SL: {sl}, TP1: {tp1}, TP2: {tp2}, TP3: {tp3}")
@@ -635,7 +662,7 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot Gold V.09.2 on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot Gold V.10.1 on port {port}")
     get_async_loop()
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
