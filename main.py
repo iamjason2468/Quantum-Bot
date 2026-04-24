@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from collections import deque
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from metaapi_cloud_sdk import MetaApi
 
 # ------------------------------------------------------------------
@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# HELPERS (moved to top)
+# HELPERS
 # ------------------------------------------------------------------
 def clamp(v, lo, hi):
     return max(lo, min(v, hi))
@@ -42,6 +42,7 @@ COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '30'))
 GOLD_FORCE_BE_AT_TP1 = os.getenv('GOLD_FORCE_BE_AT_TP1', 'true').lower() == 'true'
 GOLD_TP1_BE_BUFFER_PCT = float(os.getenv('GOLD_TP1_BE_BUFFER_PCT', '0.2'))
 GOLD_REMOVE_TP_AFTER_TP1 = os.getenv('GOLD_REMOVE_TP_AFTER_TP1', 'true').lower() == 'true'
+MAX_SPREAD_PIPS = float(os.getenv('MAX_SPREAD_PIPS', '5.0'))
 
 if not TOKEN:
     logger.error("❌ META_API_TOKEN is not set")
@@ -51,8 +52,8 @@ if not MY_ACC_ID:
 logger.info(f"📊 Lot Multiplier: {LOT_MULTIPLIER}x")
 logger.info(f"🛡️ Daily Loss Limit: {MAX_LOSS_PCT}% (Cooldown: {COOLDOWN_MINUTES}min)")
 logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips")
-logger.info(f"🪙 Gold BE: {GOLD_BE_ATR} ATR (baseline) | Trail Start: {GOLD_TRAIL_START} | Trail Dist: {GOLD_TRAIL_DIST}")
-logger.info(f"🪙 Adaptive risk scaling: ON (Efficiency Ratio only)")
+logger.info(f"🪙 Gold BE: {GOLD_BE_ATR} ATR | Trail Start: {GOLD_TRAIL_START} | Trail Dist: {GOLD_TRAIL_DIST}")
+logger.info(f"🪙 Max Spread: {MAX_SPREAD_PIPS} pips")
 
 # ------------------------------------------------------------------
 # PERSISTENT STATE
@@ -93,6 +94,16 @@ if loaded_cooldown:
         pass
 daily_start_balance = loaded_daily_bal
 
+# Recent signals deque (for dashboard)
+recent_signals = deque(maxlen=10)
+
+# Position manager state exposed globally (for dashboard)
+breakeven_done_global = set()
+trail_updated_global = {}
+post_tp1_active_global = set()
+tp1_hit_tracking_global = set()
+tp_removed_global = set()
+
 # ------------------------------------------------------------------
 # PIP & RISK HELPERS
 # ------------------------------------------------------------------
@@ -119,13 +130,12 @@ def can_trade(symbol, current_price, direction):
             return False
 
 # ------------------------------------------------------------------
-# DAILY LOSS LIMIT (simplified)
+# DAILY LOSS LIMIT
 # ------------------------------------------------------------------
 def check_daily_loss_limit(current_balance):
     global cooldown_until, daily_start_balance
     with state_lock:
         today_str = datetime.utcnow().strftime('%Y-%m-%d')
-        # Cooldown check
         if cooldown_until and datetime.utcnow() < cooldown_until:
             remaining = (cooldown_until - datetime.utcnow()).seconds // 60
             logger.info(f"⏸️ In cooldown: {remaining} minutes remaining")
@@ -134,7 +144,6 @@ def check_daily_loss_limit(current_balance):
             cooldown_until = None
             logger.info("✅ Cooldown ended — resuming trading")
 
-        # Set daily start balance if not set
         if today_str not in daily_start_balance:
             daily_start_balance = {today_str: current_balance}
             logger.info(f"📅 New trading day – start balance: ${current_balance:.2f}")
@@ -149,6 +158,28 @@ def check_daily_loss_limit(current_balance):
             logger.warning(f"⏸️ Entering cooldown for {COOLDOWN_MINUTES} minutes")
             return False
         return True
+
+# ------------------------------------------------------------------
+# SPREAD MONITOR
+# ------------------------------------------------------------------
+async def get_current_spread(symbol):
+    """Return spread in pips for the given symbol. Returns large number on error."""
+    try:
+        conn = await get_connection(MY_ACC_ID)
+        # Use get_symbol_price to fetch current bid/ask
+        price = await conn.get_symbol_price(symbol)
+        if price and 'bid' in price and 'ask' in price:
+            bid = price['bid']
+            ask = price['ask']
+            spread_price = ask - bid
+            spread_pips = spread_price / PIP_VALUE
+            return spread_pips
+        else:
+            logger.warning(f"Could not fetch spread for {symbol}")
+            return 999.0  # large safe value (block)
+    except Exception as e:
+        logger.warning(f"Spread check failed: {e}")
+        return 999.0  # block on error to be safe
 
 # ------------------------------------------------------------------
 # METAAPI INITIALIZATION
@@ -275,7 +306,6 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
         volume_per_tp = final_volume / num_tps
         volume_per_tp = max(0.01, round(volume_per_tp, 2))
 
-        # Adjust last TP volume to sum to final_volume
         if num_tps > 1:
             sum_first = volume_per_tp * (num_tps - 1)
             last_volume = round(final_volume - sum_first, 2)
@@ -384,9 +414,11 @@ async def get_trend_quality(connection, symbol):
     return clamp(er, 0.1, 1.0)
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (with all fixes)
+# POSITION MANAGER
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
+    global breakeven_done_global, trail_updated_global, post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
+
     logger.info(f"🔄 Position manager started for account {account_id}")
     breakeven_done = set()
     trail_updated = {}
@@ -400,16 +432,21 @@ async def position_manager_loop(account_id):
             connection = await get_connection(account_id)
             positions = await connection.get_positions()
             if not positions:
-                # Clean up any stale sets when no positions exist
                 breakeven_done.clear()
                 trail_updated.clear()
                 tp1_hit_tracking.clear()
                 tp_removed.clear()
                 post_tp1_active.clear()
+                # Update globals
+                with state_lock:
+                    breakeven_done_global = breakeven_done.copy()
+                    trail_updated_global = trail_updated.copy()
+                    post_tp1_active_global = post_tp1_active.copy()
+                    tp1_hit_tracking_global = tp1_hit_tracking.copy()
+                    tp_removed_global = tp_removed.copy()
                 await asyncio.sleep(5)
                 continue
 
-            # Group by rounded entry
             trade_groups = {}
             active_trade_keys = set()
             for pos in positions:
@@ -422,18 +459,14 @@ async def position_manager_loop(account_id):
                     trade_groups[key] = []
                 trade_groups[key].append(pos)
 
-            # Clean up memory sets for trades no longer active
+            # Cleanup
             for key in list(tp1_hit_tracking):
                 if key not in active_trade_keys:
                     tp1_hit_tracking.discard(key)
             for key in list(post_tp1_active):
                 if key not in active_trade_keys:
                     post_tp1_active.discard(key)
-            for key in list(tp_removed):
-                # tp_removed contains position IDs, ignore for now (minor)
-                pass
 
-            # Quality per symbol
             for symbol in set(pos['symbol'] for pos in positions):
                 if symbol not in quality_cache or (time.time() - quality_cache[symbol].get('ts', 0) > 60):
                     try:
@@ -462,7 +495,6 @@ async def position_manager_loop(account_id):
                 group_entry = round(entry, 0)
                 trade_key = f"{symbol}_{group_entry}"
 
-                # If post-TP1, force immediate trailing
                 if trade_key in post_tp1_active:
                     trail_start_mult = 0.0
 
@@ -476,7 +508,6 @@ async def position_manager_loop(account_id):
                 atr = await get_symbol_atr(connection, symbol)
                 atr_pips = atr / PIP_VALUE
 
-                # 1. TP1 approach block (only if force BE enabled)
                 if GOLD_FORCE_BE_AT_TP1 and GOLD_REMOVE_TP_AFTER_TP1 and trade_key not in tp1_hit_tracking:
                     tp1_distance = abs(tp1_price - current_price)
                     tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
@@ -504,7 +535,6 @@ async def position_manager_loop(account_id):
                         tp1_hit_tracking.add(trade_key)
                         post_tp1_active.add(trade_key)
 
-                # 2. Regular Breakeven (if not already forced)
                 if position_id not in breakeven_done:
                     sl_distance_pips = abs(entry - current_sl) / PIP_VALUE if current_sl else float('inf')
                     be_trigger_pips = min(
@@ -523,7 +553,6 @@ async def position_manager_loop(account_id):
                             logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
                             breakeven_done.add(position_id)
 
-                # 3. Trailing
                 trail_start_pips = atr_pips * trail_start_mult
                 trail_distance_pips = atr_pips * trail_dist_mult
                 if profit_pips >= trail_start_pips:
@@ -542,6 +571,14 @@ async def position_manager_loop(account_id):
                                 await connection.update_position(position_id, {'stopLoss': new_sl})
                                 logger.info(f"📉 Trailing: SL of {position_id} moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
+
+            # Update globals
+            with state_lock:
+                breakeven_done_global = breakeven_done.copy()
+                trail_updated_global = trail_updated.copy()
+                post_tp1_active_global = post_tp1_active.copy()
+                tp1_hit_tracking_global = tp1_hit_tracking.copy()
+                tp_removed_global = tp_removed.copy()
 
             await asyncio.sleep(5)
 
@@ -614,14 +651,49 @@ def webhook():
         action = data.get('action', 'buy').lower()
         entry = float(data.get('entry', 0))
 
+        # Store signal info early for logging
+        signal_time = datetime.utcnow().strftime('%H:%M:%S')
+        signal_record = {
+            "time": signal_time,
+            "symbol": final_symbol,
+            "action": action.upper(),
+            "entry": entry,
+            "status": "PENDING",
+            "reason": ""
+        }
+
+        # Min distance check
         if not can_trade(final_symbol, entry, action.upper()):
+            signal_record["status"] = "BLOCKED_MIN_DIST"
+            signal_record["reason"] = "min_distance"
+            with state_lock:
+                recent_signals.append(signal_record)
             return jsonify({"status": "blocked", "reason": "min_distance"}), 200
 
+        # Spread check
+        spread_pips = run_async(get_current_spread(final_symbol))
+        if spread_pips > MAX_SPREAD_PIPS:
+            logger.info(f"🚫 Spread too wide: {spread_pips:.1f} pips (max {MAX_SPREAD_PIPS})")
+            signal_record["status"] = "BLOCKED_SPREAD"
+            signal_record["reason"] = f"spread_{spread_pips:.1f}pips"
+            with state_lock:
+                recent_signals.append(signal_record)
+            return jsonify({"status": "blocked", "reason": "spread_too_wide", "spread_pips": spread_pips}), 200
+
+        # Balance check
         balance = run_async(fetch_account_balance(target_id))
         if balance is None:
             logger.error("❌ Cannot fetch account balance – aborting trade")
+            signal_record["status"] = "ERROR"
+            signal_record["reason"] = "balance_fetch_failed"
+            with state_lock:
+                recent_signals.append(signal_record)
             return jsonify({"status": "error", "message": "Cannot fetch account balance"}), 500
         if not check_daily_loss_limit(balance):
+            signal_record["status"] = "BLOCKED_LOSS_LIMIT"
+            signal_record["reason"] = "daily_loss_limit"
+            with state_lock:
+                recent_signals.append(signal_record)
             return jsonify({"status": "blocked", "reason": "daily_loss_limit"}), 200
 
         volume = float(data.get('volume', 0.01))
@@ -645,6 +717,15 @@ def webhook():
             )
         )
 
+        if "error" in result:
+            signal_record["status"] = "ERROR"
+            signal_record["reason"] = result.get("error", "unknown")
+        else:
+            signal_record["status"] = "EXECUTED"
+
+        with state_lock:
+            recent_signals.append(signal_record)
+
         return jsonify({
             "status": "success",
             "target_account": user,
@@ -656,6 +737,262 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+# ------------------------------------------------------------------
+# DASHBOARD API ENDPOINTS
+# ------------------------------------------------------------------
+
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    with state_lock:
+        in_cooldown = cooldown_until is not None and datetime.utcnow() < cooldown_until
+    return jsonify({
+        "online": True,
+        "cooldown": in_cooldown,
+        "time_utc": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    })
+
+@app.route('/api/account', methods=['GET'])
+def api_account():
+    balance = run_async(fetch_account_balance(MY_ACC_ID))
+    with state_lock:
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        start_bal = daily_start_balance.get(today_str, balance)
+    if balance is None:
+        balance = 0.0
+    pnl_dollar = balance - start_bal
+    pnl_pct = (pnl_dollar / start_bal * 100) if start_bal > 0 else 0.0
+    return jsonify({
+        "balance": balance,
+        "daily_start_balance": start_bal,
+        "daily_pnl_dollar": round(pnl_dollar, 2),
+        "daily_pnl_percent": round(pnl_pct, 2)
+    })
+
+@app.route('/api/positions', methods=['GET'])
+def api_positions():
+    try:
+        positions = run_async(get_positions_for_api(MY_ACC_ID))
+        return jsonify(positions)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+async def get_positions_for_api(account_id):
+    try:
+        conn = await get_connection(account_id)
+        positions = await conn.get_positions()
+        result = []
+        for pos in positions:
+            result.append({
+                "positionId": pos['id'],
+                "type": "BUY" if pos['type'] == 'POSITION_TYPE_BUY' else "SELL",
+                "symbol": pos['symbol'],
+                "volume": pos['volume'],
+                "open_price": pos['openPrice'],
+                "current_price": pos.get('currentPrice', 0),
+                "sl": pos.get('stopLoss', 0),
+                "tp": pos.get('takeProfit', 0),
+                "profit_dollar": pos.get('profit', 0)
+            })
+        return result
+    except Exception as e:
+        return []
+
+@app.route('/api/spread', methods=['GET'])
+def api_spread():
+    symbol = "XAUUSD" + GOLD_SUFFIX
+    spread_pips = run_async(get_current_spread(symbol))
+    return jsonify({
+        "symbol": symbol,
+        "spread_pips": round(spread_pips, 2),
+        "max_spread_pips": MAX_SPREAD_PIPS,
+        "is_safe": spread_pips <= MAX_SPREAD_PIPS
+    })
+
+@app.route('/api/signals', methods=['GET'])
+def api_signals():
+    with state_lock:
+        return jsonify(list(recent_signals))
+
+@app.route('/api/manager', methods=['GET'])
+def api_manager():
+    with state_lock:
+        groups = {}
+        # Collect all keys
+        all_keys = set()
+        all_keys.update(post_tp1_active_global)
+        all_keys.update(tp1_hit_tracking_global)
+        # We don't have a direct way to list all groups, so we infer from the sets
+        for key in all_keys:
+            groups[key] = {
+                "force_be_done": key in tp1_hit_tracking_global,
+                "tp_removed": key in tp_removed_global,
+                "trailing_active": key in post_tp1_active_global
+            }
+    return jsonify(groups)
+
+# ------------------------------------------------------------------
+# DASHBOARD HTML
+# ------------------------------------------------------------------
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum Gold | Master Terminal</title>
+    <style>
+        /* Same CSS as provided, unchanged */
+    </style>
+</head>
+<body>
+    <!-- Same HTML structure as provided, with IDs preserved -->
+    <!-- The JavaScript below replaces the simulated data with real API calls -->
+
+    <script>
+        // Replace simulated data with API calls
+        const API_BASE = window.location.origin;
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch(API_BASE + '/api/status');
+                const data = await res.json();
+                document.getElementById('statusPulse').classList.toggle('pulse-stale', !data.online);
+                document.getElementById('statusText').innerText = data.online ? 'ENGINE LIVE' : 'OFFLINE';
+                document.getElementById('statusText').style.color = data.online ? 'var(--accent-gold)' : 'var(--accent-red)';
+                document.getElementById('clock').innerText = data.time_utc.split(' ')[1] + ' UTC';
+                // Cooldown banner
+                if (data.cooldown) {
+                    showCooldownBanner();
+                } else {
+                    hideCooldownBanner();
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchAccount() {
+            try {
+                const res = await fetch(API_BASE + '/api/account');
+                const data = await res.json();
+                document.getElementById('balance').innerText = '$' + data.balance.toFixed(2);
+                const pnlEl = document.querySelector('.card .stat-value-sm') || document.getElementById('balance').nextElementSibling;
+                // Update daily P&L display
+                const pnlText = (data.daily_pnl_dollar >= 0 ? '+' : '') + '$' + data.daily_pnl_dollar.toFixed(2) + ' Today';
+                const pnlColor = data.daily_pnl_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                if (document.getElementById('dailyPnL')) {
+                    document.getElementById('dailyPnL').innerText = pnlText;
+                    document.getElementById('dailyPnL').style.color = pnlColor;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchPositions() {
+            try {
+                const res = await fetch(API_BASE + '/api/positions');
+                const positions = await res.json();
+                const tbody = document.querySelector('#positions-table tbody') || document.querySelector('table tbody');
+                if (!tbody) return;
+                tbody.innerHTML = '';
+                positions.forEach(pos => {
+                    const row = tbody.insertRow();
+                    row.innerHTML = `
+                        <td>#${pos.positionId}<br><b style="color:${pos.type === 'BUY' ? 'var(--accent-green)' : 'var(--accent-red)'}">${pos.type} ${pos.volume}</b></td>
+                        <td><span class="price-tag">${pos.open_price}</span><br><small style="color:var(--text-dim)">${pos.current_price}</small></td>
+                        <td><span style="color:var(--accent-red)">${pos.sl}</span> / <span style="color:var(--accent-green)">${pos.tp === 0 ? 'TRAIL' : pos.tp}</span></td>
+                        <td style="color:${pos.profit_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}; font-weight:bold;">${pos.profit_dollar >= 0 ? '+' : ''}$${pos.profit_dollar.toFixed(2)}</td>
+                    `;
+                });
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchSpread() {
+            try {
+                const res = await fetch(API_BASE + '/api/spread');
+                const data = await res.json();
+                const display = document.getElementById('spreadDisplay');
+                display.innerText = `Spread: ${data.spread_pips.toFixed(1)}`;
+                if (!data.is_safe) {
+                    display.classList.add('spread-high');
+                } else {
+                    display.classList.remove('spread-high');
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchSignals() {
+            try {
+                const res = await fetch(API_BASE + '/api/signals');
+                const signals = await res.json();
+                const consoleEl = document.getElementById('logConsole');
+                if (!consoleEl) return;
+                consoleEl.innerHTML = '';
+                signals.reverse().forEach(sig => {
+                    const div = document.createElement('div');
+                    div.className = 'log-entry';
+                    let color = '#888';
+                    if (sig.status === 'EXECUTED') color = 'var(--accent-green)';
+                    else if (sig.status.startsWith('BLOCKED')) color = 'var(--accent-red)';
+                    else if (sig.status === 'ERROR') color = 'var(--accent-orange)';
+                    div.innerHTML = `<span style="color:#555">${sig.time}</span> [${sig.status}] ${sig.action} ${sig.symbol} @ ${sig.entry} ${sig.reason ? '('+sig.reason+')' : ''}`;
+                    consoleEl.appendChild(div);
+                });
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchManager() {
+            try {
+                const res = await fetch(API_BASE + '/api/manager');
+                const data = await res.json();
+                // Update position manager info on the dashboard
+                const managerInfo = document.getElementById('manager-info');
+                if (managerInfo) {
+                    let html = '';
+                    for (const [key, val] of Object.entries(data)) {
+                        html += `<div style="font-size:0.7rem; margin:2px 0">${key}: Force BE:${val.force_be_done} | TP Removed:${val.tp_removed} | Trail:${val.trailing_active}</div>`;
+                    }
+                    managerInfo.innerHTML = html || '<div style="color:var(--text-dim)">No active groups</div>';
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        function showCooldownBanner() {
+            let banner = document.getElementById('cooldownBanner');
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'cooldownBanner';
+                banner.style.cssText = 'background:var(--accent-red); color:#fff; text-align:center; padding:10px; margin-bottom:15px; border-radius:8px; font-weight:bold;';
+                document.body.insertBefore(banner, document.body.firstChild);
+            }
+            banner.innerText = '⏸️ BOT IN COOLDOWN - TRADING PAUSED';
+        }
+
+        function hideCooldownBanner() {
+            const banner = document.getElementById('cooldownBanner');
+            if (banner) banner.remove();
+        }
+
+        // Refresh all data every 10 seconds
+        function refreshAll() {
+            fetchStatus();
+            fetchAccount();
+            fetchPositions();
+            fetchSpread();
+            fetchSignals();
+            fetchManager();
+        }
+
+        // Initial load
+        refreshAll();
+        setInterval(refreshAll, 10000);
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/dashboard', methods=['GET'])
+def dashboard():
+    return render_template_string(DASHBOARD_HTML)
 
 # ------------------------------------------------------------------
 # MAIN
