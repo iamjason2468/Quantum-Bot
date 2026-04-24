@@ -25,23 +25,14 @@ FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'quantum-gold-2026')
 
-# Lot size control
 LOT_MULTIPLIER = float(os.getenv('LOT_MULTIPLIER', '0.3'))
-
-# Gold risk parameters
 GOLD_BE_ATR = float(os.getenv('GOLD_BE_ATR', '0.5'))
 GOLD_TRAIL_START = float(os.getenv('GOLD_TRAIL_START', '1.0'))
 GOLD_TRAIL_DIST = float(os.getenv('GOLD_TRAIL_DIST', '0.4'))
-
-# Safety filters
-MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '10'))  # 10 real pips
-
-# Rolling loss limit
+MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '10'))
 MAX_LOSS_LOOKBACK_MINUTES = int(os.getenv('MAX_LOSS_LOOKBACK_MINUTES', '120'))
 MAX_LOSS_PCT = float(os.getenv('MAX_LOSS_PCT', '3.0'))
 COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '30'))
-
-# Gold-specific features
 GOLD_FORCE_BE_AT_TP1 = os.getenv('GOLD_FORCE_BE_AT_TP1', 'true').lower() == 'true'
 GOLD_TP1_BE_BUFFER_PCT = float(os.getenv('GOLD_TP1_BE_BUFFER_PCT', '0.2'))
 GOLD_REMOVE_TP_AFTER_TP1 = os.getenv('GOLD_REMOVE_TP_AFTER_TP1', 'true').lower() == 'true'
@@ -50,13 +41,6 @@ if not TOKEN:
     logger.error("❌ META_API_TOKEN is not set")
 if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
-
-logger.info(f"📊 Lot Multiplier: {LOT_MULTIPLIER}x")
-logger.info(f"🛡️ Rolling Loss Limit: {MAX_LOSS_PCT}% over {MAX_LOSS_LOOKBACK_MINUTES}min (Cooldown: {COOLDOWN_MINUTES}min)")
-logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips")
-logger.info(f"🪙 Gold BE: {GOLD_BE_ATR} ATR | Trail Start: {GOLD_TRAIL_START} | Trail Dist: {GOLD_TRAIL_DIST}")
-logger.info(f"🪙 Remove TP after TP1: {GOLD_REMOVE_TP_AFTER_TP1}")
-logger.info(f"🔐 Webhook Security: {'ENABLED' if WEBHOOK_SECRET else 'DISABLED'}")
 
 # ------------------------------------------------------------------
 # TRACKING STATE
@@ -67,9 +51,9 @@ cooldown_until = None
 window_start_balance = {}
 
 # ------------------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ------------------------------------------------------------------
-PIP_VALUE = 0.1  # Gold: 1 pip = $0.10
+PIP_VALUE = 0.1
 
 def get_pip_value(symbol=""):
     return PIP_VALUE
@@ -82,12 +66,11 @@ def can_trade(symbol, current_price, direction):
     if key not in last_trade_price:
         return True
     last_price = last_trade_price[key]
-    min_distance = MIN_DISTANCE_PIPS_GOLD
     distance_pips = abs(current_price - last_price) / PIP_VALUE
-    if distance_pips >= min_distance:
+    if distance_pips >= MIN_DISTANCE_PIPS_GOLD:
         return True
     else:
-        logger.info(f"⛔ Signal blocked: Only {distance_pips:.1f} pips from last {direction} trade. Need {min_distance}")
+        logger.info(f"⛔ Signal blocked: Only {distance_pips:.1f} pips from last {direction} trade. Need {MIN_DISTANCE_PIPS_GOLD}")
         return False
 
 def record_trade_result(pnl_amount):
@@ -95,7 +78,6 @@ def record_trade_result(pnl_amount):
     cutoff = datetime.utcnow() - timedelta(minutes=MAX_LOSS_LOOKBACK_MINUTES)
     while trade_history and trade_history[0][0] < cutoff:
         trade_history.popleft()
-    # Clean up old balance snapshots
     for key in list(window_start_balance.keys()):
         key_dt = datetime.strptime(key, '%Y-%m-%d %H:%M')
         if key_dt < cutoff:
@@ -138,7 +120,7 @@ def check_rolling_loss_limit(current_balance):
     return True
 
 # ------------------------------------------------------------------
-# LAZY METAAPI INITIALIZATION
+# METAAPI INITIALIZATION (with region)
 # ------------------------------------------------------------------
 _metaapi_instance = None
 _metaapi_lock = threading.Lock()
@@ -153,20 +135,20 @@ def get_metaapi():
     return _metaapi_instance
 
 # ------------------------------------------------------------------
-# CONNECTION CACHE
+# CONNECTION CACHE & KEEPER
 # ------------------------------------------------------------------
 connections = {}
 connection_lock = asyncio.Lock()
 
-async def get_connection(account_id):
+async def _ensure_connection(account_id):
+    """Ensure a live connection exists, creating/deploying if needed."""
     async with connection_lock:
         if account_id in connections:
             conn = connections[account_id]
             try:
                 await asyncio.wait_for(conn.get_account_information(), timeout=5.0)
                 return conn
-            except Exception as e:
-                logger.warning(f"⚠️ Existing connection dead for {account_id}: {e}")
+            except Exception:
                 del connections[account_id]
 
         logger.info(f"🔌 Establishing new connection for account {account_id}")
@@ -182,8 +164,19 @@ async def get_connection(account_id):
         connections[account_id] = connection
         return connection
 
+async def keep_connection_alive(account_id):
+    """Background task that maintains a live connection at all times."""
+    while True:
+        try:
+            await _ensure_connection(account_id)
+            # Check every 10 seconds, reconnect if dead
+            await asyncio.sleep(10)
+        except Exception as e:
+            logger.warning(f"Connection keeper error: {e}, retrying in 5s")
+            await asyncio.sleep(5)
+
 # ------------------------------------------------------------------
-# ADAPTIVE LOT SIZING (Gold Only)
+# ADAPTIVE LOT SIZING
 # ------------------------------------------------------------------
 def get_adaptive_lot(account_balance):
     if account_balance < 100:
@@ -230,7 +223,7 @@ async def close_opposite_positions(account_id, symbol, new_direction):
         return 0
 
 # ------------------------------------------------------------------
-# PLACE TRADE (Gold Only)
+# PLACE TRADE
 # ------------------------------------------------------------------
 async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive=True):
     try:
@@ -291,7 +284,7 @@ async def place_single_trade(account_id, action, symbol, volume, entry, sl, tp1,
         return {"error": str(e)}
 
 # ------------------------------------------------------------------
-# ATR CACHE (Gold Only)
+# ATR CACHE
 # ------------------------------------------------------------------
 atr_cache = {}
 ATR_CACHE_TTL = 60
@@ -320,7 +313,7 @@ async def get_symbol_atr(connection, symbol):
         return 0.01
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (Gold Only — with TP removal after TP1)
+# POSITION MANAGER
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
@@ -367,7 +360,6 @@ async def position_manager_loop(account_id):
                 atr = await get_symbol_atr(connection, symbol)
                 atr_pips = atr / PIP_VALUE
 
-                # --- GOLD: Remove TP2/TP3 after TP1 hit ---
                 trade_key = f"{symbol}_{entry}"
                 if GOLD_REMOVE_TP_AFTER_TP1 and trade_key not in tp1_hit_tracking:
                     tp1_distance = abs(tp1_price - current_price)
@@ -384,33 +376,26 @@ async def position_manager_loop(account_id):
                                     logger.warning(f"Could not remove TP: {e}")
                         tp1_hit_tracking.add(trade_key)
 
-                # --- Force BE near TP1 ---
-                if GOLD_FORCE_BE_AT_TP1:
-                    if trade_key not in tp1_hit_tracking:
-                        tp1_distance = abs(tp1_price - current_price)
-                        tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
-                        if tp1_distance <= tp1_threshold:
-                            logger.info(f"🪙 Gold TP1 approaching! Price: {current_price}, TP1: {tp1_price}")
-                            for group_pos in trade_groups.get(trade_key, []):
-                                if group_pos['id'] not in breakeven_done:
-                                    buffer = 2 * PIP_VALUE
-                                    if pos_type == 'POSITION_TYPE_BUY':
-                                        new_sl = entry + buffer
-                                    else:
-                                        new_sl = entry - buffer
-                                    if (pos_type == 'POSITION_TYPE_BUY' and new_sl > group_pos.get('stopLoss', 0)) or \
-                                       (pos_type == 'POSITION_TYPE_SELL' and new_sl < group_pos.get('stopLoss', 0)):
-                                        await connection.update_position(group_pos['id'], {'stopLoss': new_sl})
-                                        logger.info(f"🎯 Force BE: Moved SL of {group_pos['id']} to {new_sl}")
-                                        breakeven_done.add(group_pos['id'])
-                            tp1_hit_tracking.add(trade_key)
+                if GOLD_FORCE_BE_AT_TP1 and trade_key not in tp1_hit_tracking:
+                    tp1_distance = abs(tp1_price - current_price)
+                    tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
+                    if tp1_distance <= tp1_threshold:
+                        for group_pos in trade_groups.get(trade_key, []):
+                            if group_pos['id'] not in breakeven_done:
+                                buffer = 2 * PIP_VALUE
+                                if pos_type == 'POSITION_TYPE_BUY':
+                                    new_sl = entry + buffer
+                                else:
+                                    new_sl = entry - buffer
+                                if (pos_type == 'POSITION_TYPE_BUY' and new_sl > group_pos.get('stopLoss', 0)) or \
+                                   (pos_type == 'POSITION_TYPE_SELL' and new_sl < group_pos.get('stopLoss', 0)):
+                                    await connection.update_position(group_pos['id'], {'stopLoss': new_sl})
+                                    logger.info(f"🎯 Force BE: Moved SL of {group_pos['id']} to {new_sl}")
+                                    breakeven_done.add(group_pos['id'])
+                        tp1_hit_tracking.add(trade_key)
 
-                # --- Breakeven (capped at 70% of SL) ---
                 sl_distance_pips = abs(entry - current_sl) / PIP_VALUE if current_sl else float('inf')
-                be_trigger_pips = min(
-                    atr_pips * be_trigger_mult,
-                    sl_distance_pips * 0.7
-                )
+                be_trigger_pips = min(atr_pips * be_trigger_mult, sl_distance_pips * 0.7)
                 if profit_pips >= be_trigger_pips and position_id not in breakeven_done:
                     buffer = 2 * PIP_VALUE
                     if pos_type == 'POSITION_TYPE_BUY':
@@ -423,7 +408,6 @@ async def position_manager_loop(account_id):
                         logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
                         breakeven_done.add(position_id)
 
-                # --- Trailing ---
                 trail_start_pips = atr_pips * trail_start_mult
                 trail_distance_pips = atr_pips * trail_dist_mult
                 if profit_pips >= trail_start_pips:
@@ -473,12 +457,13 @@ def get_async_loop():
 def run_async(coro):
     loop = get_async_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=30)
+    return future.result(timeout=45)  # increased to 45s
 
 def start_position_manager(account_id):
     loop = get_async_loop()
+    asyncio.run_coroutine_threadsafe(keep_connection_alive(account_id), loop)
     asyncio.run_coroutine_threadsafe(position_manager_loop(account_id), loop)
-    logger.info(f"🧵 Position manager scheduled for account {account_id}")
+    logger.info(f"🧵 Position manager & connection keeper scheduled for account {account_id}")
 
 # ------------------------------------------------------------------
 # ENDPOINTS
@@ -516,7 +501,6 @@ def webhook():
         if not can_trade(final_symbol, entry, action.upper()):
             return jsonify({"status": "blocked", "reason": "min_distance"}), 200
 
-        connection = run_async(get_connection(target_id))
         balance = run_async(fetch_account_balance(target_id))
         if balance is not None and not check_rolling_loss_limit(balance):
             return jsonify({"status": "blocked", "reason": "rolling_loss_limit"}), 200
