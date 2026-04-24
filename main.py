@@ -25,13 +25,13 @@ FRIEND_ACC_ID = os.getenv('FRIEND_ACCOUNT_ID')
 GOLD_SUFFIX = os.getenv('GOLD_SUFFIX', 'm')
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'quantum-gold-2026')
 
-LOT_MULTIPLIER = float(os.getenv('LOT_MULTIPLIER', '0.3'))
+LOT_MULTIPLIER = float(os.getenv('LOT_MULTIPLIER', '0.15'))
 GOLD_BE_ATR = float(os.getenv('GOLD_BE_ATR', '0.5'))
 GOLD_TRAIL_START = float(os.getenv('GOLD_TRAIL_START', '1.0'))
 GOLD_TRAIL_DIST = float(os.getenv('GOLD_TRAIL_DIST', '0.4'))
 MIN_DISTANCE_PIPS_GOLD = float(os.getenv('MIN_DISTANCE_PIPS_GOLD', '10'))
-MAX_LOSS_LOOKBACK_MINUTES = int(os.getenv('MAX_LOSS_LOOKBACK_MINUTES', '120'))
-MAX_LOSS_PCT = float(os.getenv('MAX_LOSS_PCT', '3.0'))
+MAX_LOSS_LOOKBACK_MINUTES = int(os.getenv('MAX_LOSS_LOOKBACK_MINUTES', '60'))
+MAX_LOSS_PCT = float(os.getenv('MAX_LOSS_PCT', '2.0'))
 COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '30'))
 GOLD_FORCE_BE_AT_TP1 = os.getenv('GOLD_FORCE_BE_AT_TP1', 'true').lower() == 'true'
 GOLD_TP1_BE_BUFFER_PCT = float(os.getenv('GOLD_TP1_BE_BUFFER_PCT', '0.2'))
@@ -120,7 +120,7 @@ def check_rolling_loss_limit(current_balance):
     return True
 
 # ------------------------------------------------------------------
-# METAAPI INITIALIZATION (with region)
+# METAAPI INITIALIZATION
 # ------------------------------------------------------------------
 _metaapi_instance = None
 _metaapi_lock = threading.Lock()
@@ -140,8 +140,8 @@ def get_metaapi():
 connections = {}
 connection_lock = asyncio.Lock()
 
-async def _ensure_connection(account_id):
-    """Ensure a live connection exists, creating/deploying if needed."""
+async def get_connection(account_id):
+    """Replacement for the old get_connection – ensures a live connection."""
     async with connection_lock:
         if account_id in connections:
             conn = connections[account_id]
@@ -165,11 +165,10 @@ async def _ensure_connection(account_id):
         return connection
 
 async def keep_connection_alive(account_id):
-    """Background task that maintains a live connection at all times."""
+    """Background task that maintains a live connection."""
     while True:
         try:
-            await _ensure_connection(account_id)
-            # Check every 10 seconds, reconnect if dead
+            await get_connection(account_id)
             await asyncio.sleep(10)
         except Exception as e:
             logger.warning(f"Connection keeper error: {e}, retrying in 5s")
@@ -313,7 +312,7 @@ async def get_symbol_atr(connection, symbol):
         return 0.01
 
 # ------------------------------------------------------------------
-# POSITION MANAGER
+# POSITION MANAGER (unchanged logic)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     logger.info(f"🔄 Position manager started for account {account_id}")
@@ -457,7 +456,7 @@ def get_async_loop():
 def run_async(coro):
     loop = get_async_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=45)  # increased to 45s
+    return future.result(timeout=45)
 
 def start_position_manager(account_id):
     loop = get_async_loop()
@@ -474,7 +473,7 @@ def ping():
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({"service": "Quantum Bot Gold V.09", "status": "online"}), 200
+    return jsonify({"service": "Quantum Bot Gold V.09.1", "status": "online"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -543,7 +542,7 @@ def webhook():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting Quantum Bot Gold V.09 on port {port}")
+    logger.info(f"🚀 Starting Quantum Bot Gold V.09.1 on port {port}")
     get_async_loop()
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
