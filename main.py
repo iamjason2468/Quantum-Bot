@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# HELPERS (moved to top)
+# HELPERS
 # ------------------------------------------------------------------
 def clamp(v, lo, hi):
     return max(lo, min(v, hi))
@@ -89,14 +89,12 @@ daily_start_balance = {}
 cooldown_until = None
 recent_signals = deque(maxlen=10)
 
-# Position manager state exposed globally (for dashboard)
 breakeven_done_global = set()
 trail_updated_global = {}
 post_tp1_active_global = set()
 tp1_hit_tracking_global = set()
 tp_removed_global = set()
 
-# Load saved state
 loaded_cooldown, loaded_daily_bal = load_state()
 if loaded_cooldown:
     try:
@@ -108,7 +106,7 @@ daily_start_balance = loaded_daily_bal
 # ------------------------------------------------------------------
 # PIP & RISK HELPERS
 # ------------------------------------------------------------------
-PIP_VALUE = 0.1  # 1 pip = $0.10 for XAUUSD
+PIP_VALUE = 0.1
 
 def get_pip_value(symbol=""):
     return PIP_VALUE
@@ -131,7 +129,7 @@ def can_trade(symbol, current_price, direction):
             return False
 
 # ------------------------------------------------------------------
-# DAILY LOSS LIMIT (simplified)
+# DAILY LOSS LIMIT
 # ------------------------------------------------------------------
 def check_daily_loss_limit(current_balance):
     global cooldown_until, daily_start_balance
@@ -239,10 +237,9 @@ async def fetch_account_balance(account_id):
         return None
 
 # ------------------------------------------------------------------
-# SPREAD & POSITIONS HELPERS (for dashboard API)
+# SPREAD & POSITIONS HELPERS
 # ------------------------------------------------------------------
 async def get_current_spread(symbol):
-    """Return spread in pips for the given symbol."""
     try:
         conn = await get_connection(MY_ACC_ID)
         price = await conn.get_symbol_price(symbol)
@@ -259,7 +256,6 @@ async def get_current_spread(symbol):
         return 999.0
 
 async def get_positions_for_api(account_id):
-    """Return formatted positions for the dashboard API."""
     try:
         conn = await get_connection(account_id)
         positions = await conn.get_positions()
@@ -408,7 +404,7 @@ async def get_symbol_atr(connection, symbol):
         return 0.01
 
 # ------------------------------------------------------------------
-# TREND QUALITY (Efficiency Ratio only)
+# TREND QUALITY
 # ------------------------------------------------------------------
 def calc_efficiency_ratio(high, low, close, length=20):
     if len(high) < length + 1 or len(low) < length + 1:
@@ -435,7 +431,7 @@ async def get_trend_quality(connection, symbol):
     return clamp(er, 0.1, 1.0)
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (with all fixes)
+# POSITION MANAGER
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     global breakeven_done_global, trail_updated_global, post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
@@ -591,7 +587,6 @@ async def position_manager_loop(account_id):
                                 logger.info(f"📉 Trailing: SL of {position_id} moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
 
-            # Update globals for dashboard
             with state_lock:
                 breakeven_done_global = breakeven_done.copy()
                 trail_updated_global = trail_updated.copy()
@@ -636,6 +631,16 @@ def start_position_manager(account_id):
     asyncio.run_coroutine_threadsafe(keep_connection_alive(account_id), loop)
     asyncio.run_coroutine_threadsafe(position_manager_loop(account_id), loop)
     logger.info(f"🧵 Position manager & connection keeper scheduled for account {account_id}")
+
+# ======================================================================
+# INITIALIZE DASHBOARD (MUST be called at module level for Gunicorn)
+# ======================================================================
+init_dashboard(
+    state_lock, run_async, fetch_account_balance, get_current_spread,
+    get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS,
+    daily_start_balance, cooldown_until, recent_signals,
+    post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
+)
 
 # ------------------------------------------------------------------
 # ENDPOINTS
@@ -720,14 +725,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Starting Quantum Bot Gold V.11 on port {port}")
     get_async_loop()
-
-    # Initialize dashboard
-    init_dashboard(
-        state_lock, run_async, fetch_account_balance, get_current_spread,
-        get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS,
-        daily_start_balance, cooldown_until, recent_signals,
-        post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
-    )
 
     if MY_ACC_ID:
         start_position_manager(MY_ACC_ID)
