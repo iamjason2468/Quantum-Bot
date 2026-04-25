@@ -93,8 +93,15 @@ current_market_data = {
     "status": "WAITING"
 }
 
-# Equity history for sparkline (stored every 10 seconds)
-equity_history = deque(maxlen=288)  # 288 points = 48 minutes at 10s intervals
+# Equity history for sparkline (stored every 5 seconds)
+equity_history = deque(maxlen=288)
+
+# Closed trade P&L for performance metrics
+closed_trade_pnls = deque(maxlen=100)
+
+# Track balance before a trade group opens to later compute P&L
+trade_entry_balance = None
+trade_group_open = False
 
 breakeven_done_global = set()
 trail_updated_global = {}
@@ -438,10 +445,11 @@ async def get_trend_quality(connection, symbol):
     return clamp(er, 0.1, 1.0)
 
 # ------------------------------------------------------------------
-# POSITION MANAGER
+# POSITION MANAGER (now records closed trade P&L)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     global breakeven_done_global, trail_updated_global, post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
+    global trade_entry_balance, trade_group_open
 
     logger.info(f"🔄 Position manager started for account {account_id}")
     breakeven_done = set()
@@ -456,6 +464,15 @@ async def position_manager_loop(account_id):
             connection = await get_connection(account_id)
             positions = await connection.get_positions()
             if not positions:
+                # --- trade group just closed ---
+                if trade_group_open and trade_entry_balance is not None:
+                    current_balance = await fetch_account_balance(account_id)
+                    if current_balance is not None:
+                        pnl = current_balance - trade_entry_balance
+                        closed_trade_pnls.append(pnl)
+                        logger.info(f"📊 Trade group closed – P&L: ${pnl:.2f}")
+                    trade_group_open = False
+
                 breakeven_done.clear()
                 trail_updated.clear()
                 tp1_hit_tracking.clear()
@@ -469,6 +486,11 @@ async def position_manager_loop(account_id):
                     tp_removed_global = tp_removed.copy()
                 await asyncio.sleep(5)
                 continue
+
+            # --- trade group just opened ---
+            if not trade_group_open:
+                trade_entry_balance = await fetch_account_balance(account_id)
+                trade_group_open = True
 
             trade_groups = {}
             active_trade_keys = set()
@@ -594,7 +616,6 @@ async def position_manager_loop(account_id):
                                 logger.info(f"📉 Trailing: SL of {position_id} moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
 
-            # Update globals for dashboard
             with state_lock:
                 breakeven_done_global = breakeven_done.copy()
                 trail_updated_global = trail_updated.copy()
@@ -602,7 +623,6 @@ async def position_manager_loop(account_id):
                 tp1_hit_tracking_global = tp1_hit_tracking.copy()
                 tp_removed_global = tp_removed.copy()
 
-            # Update equity history (balance already fetched indirectly, but we can grab it now)
             balance = await fetch_account_balance(account_id)
             if balance is not None:
                 equity_history.append({"time": datetime.utcnow().isoformat(), "balance": balance})
@@ -646,14 +666,15 @@ def start_position_manager(account_id):
     logger.info(f"🧵 Position manager & connection keeper scheduled for account {account_id}")
 
 # ======================================================================
-# INITIALIZE DASHBOARD (MUST be called at module level for Gunicorn)
+# INITIALIZE DASHBOARD
 # ======================================================================
 init_dashboard(
     state_lock, run_async, fetch_account_balance, get_current_spread,
     get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS,
     daily_start_balance, cooldown_until, recent_signals,
     post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global,
-    get_connection, current_market_data, equity_history
+    get_connection, current_market_data, equity_history,
+    closed_trade_pnls            # ← new parameter
 )
 
 # ------------------------------------------------------------------
@@ -689,7 +710,6 @@ def webhook():
         action = data.get('action', 'buy').lower()
         entry = float(data.get('entry', 0))
 
-        # Store signal info and market intelligence early
         signal_time = datetime.utcnow().strftime('%H:%M:%S')
         signal_record = {
             "time": signal_time,
@@ -770,7 +790,6 @@ def webhook():
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- NEW: Market webhook (no trade, just updates market data) ---
 @app.route('/market_webhook', methods=['POST'])
 def market_webhook():
     global current_market_data
