@@ -21,15 +21,14 @@ recent_signals = None
 post_tp1_active_global = None
 tp1_hit_tracking_global = None
 tp_removed_global = None
+_get_connection_raw = None  # <-- This will hold the MetaApi connection function
 
-# We'll use _get_connection_raw which will be set from main.py
-_get_connection_raw = None
 
 def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spread,
                    get_positions_for_api, my_acc_id, gold_suffix, max_spread_pips,
                    daily_start_bal, cooldown, recent_sigs,
                    post_tp1_active, tp1_hit_tracking, tp_removed,
-                   get_connection_raw=None):
+                   get_connection_raw=None):   # <-- receives the function
     """Call this from main.py to connect the dashboard to the bot's state."""
     global _state_lock, _run_async, _fetch_account_balance, _get_current_spread
     global _get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS
@@ -53,18 +52,19 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
     tp_removed_global = tp_removed
     _get_connection_raw = get_connection_raw
 
+
 # ------------------------------------------------------------------
-# Market state calculation (real-time indicators using existing connection)
+# Market state calculation (real-time indicators)
 # ------------------------------------------------------------------
 async def _compute_market_state():
     """Calculate current market indicators from 5‑minute candles using existing MetaApi connection."""
     try:
         if _get_connection_raw is None:
             return None
-        
+
         conn = await _get_connection_raw(MY_ACC_ID)
         symbol = "XAUUSD" + GOLD_SUFFIX
-        
+
         # Fetch 100 candles of 5‑minute
         candles = await conn.get_candles(symbol, '5m', 100)
         if not candles or len(candles) < 50:
@@ -96,17 +96,15 @@ async def _compute_market_state():
         price = closes[-1]
 
         # RSI 14
-        def rsi(data, period=14):
-            gains = [max(data[i] - data[i-1], 0) for i in range(1, len(data))]
-            losses = [max(data[i-1] - data[i], 0) for i in range(1, len(data))]
-            avg_gain = sum(gains[:period]) / period
-            avg_loss = sum(losses[:period]) / period
-            if avg_loss == 0:
-                return 100.0
+        gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+        losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+        avg_gain = sum(gains[:14]) / 14
+        avg_loss = sum(losses[:14]) / 14
+        if avg_loss == 0:
+            rsi_val = 100.0
+        else:
             rs = avg_gain / avg_loss
-            return 100 - (100 / (1 + rs))
-
-        rsi_val = rsi(closes)
+            rsi_val = 100 - (100 / (1 + rs))
 
         # MACD (12,26,9)
         ema12 = ema(closes, 12)
@@ -115,7 +113,7 @@ async def _compute_market_state():
         signal_line = ema(macd_line, 9)
         macd_bull = macd_line[-1] > signal_line[-1]
 
-        # ADX (14) - simplified
+        # ADX (14) simplified
         tr_vals = []
         plus_dm = []
         minus_dm = []
@@ -142,7 +140,6 @@ async def _compute_market_state():
         strong_trend = adx_val > 25
         weak_trend = adx_val < 20
 
-        # EMA slope (3-bar)
         slope_now = ema50_vals[-1] - ema50_vals[-4] if len(ema50_vals) >= 4 else 0
         slope_prev = ema50_vals[-2] - ema50_vals[-5] if len(ema50_vals) >= 5 else 0
 
@@ -162,25 +159,24 @@ async def _compute_market_state():
             smart_filter = "BLOCKED"
 
         # Bias scores (simplified)
-        b_score = 0
-        b_max = 6
-        b_score += 1 if price > vwap else 0
-        b_score += 1 if rsi_val > 50 else 0
-        b_score += 1 if macd_bull else 0
-        b_score += 1 if latest_ema9 > latest_ema21 else 0
-        b_score += 1 if (adx_val > 25 and price > latest_ema9) else 0
-        b_score += 1 if rsi_val > 50 else 0  # rsi5m same
-        bull_pct = round(b_score / b_max * 100)
-
-        r_score = 0
-        r_max = 6
-        r_score += 1 if price < vwap else 0
-        r_score += 1 if rsi_val < 50 else 0
-        r_score += 1 if not macd_bull else 0
-        r_score += 1 if latest_ema9 < latest_ema21 else 0
-        r_score += 1 if (adx_val > 25 and price < latest_ema9) else 0
-        r_score += 1 if rsi_val < 50 else 0
-        bear_pct = round(r_score / r_max * 100)
+        b_score = sum([
+            price > vwap,
+            rsi_val > 50,
+            macd_bull,
+            latest_ema9 > latest_ema21,
+            adx_val > 25 and price > latest_ema9,
+            rsi_val > 50  # rsi5m same as RSI14 for simplicity
+        ])
+        r_score = sum([
+            price < vwap,
+            rsi_val < 50,
+            not macd_bull,
+            latest_ema9 < latest_ema21,
+            adx_val > 25 and price < latest_ema9,
+            rsi_val < 50
+        ])
+        bull_pct = round(b_score / 6 * 100)
+        bear_pct = round(r_score / 6 * 100)
 
         diff = bull_pct - bear_pct
         if diff >= 40:
@@ -216,6 +212,7 @@ async def _compute_market_state():
         print(f"Market state error: {e}")
         return None
 
+
 # ------------------------------------------------------------------
 # API ENDPOINTS
 # ------------------------------------------------------------------
@@ -229,6 +226,7 @@ def api_status():
         "cooldown": in_cooldown,
         "time_utc": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     })
+
 
 @dashboard_bp.route('/api/account')
 def api_account():
@@ -247,6 +245,7 @@ def api_account():
         "daily_pnl_percent": round(pnl_pct, 2)
     })
 
+
 @dashboard_bp.route('/api/positions')
 def api_positions():
     try:
@@ -254,6 +253,7 @@ def api_positions():
         return jsonify(positions)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @dashboard_bp.route('/api/spread')
 def api_spread():
@@ -266,10 +266,12 @@ def api_spread():
         "is_safe": spread_pips <= MAX_SPREAD_PIPS
     })
 
+
 @dashboard_bp.route('/api/signals')
 def api_signals():
     with _state_lock:
         return jsonify(list(recent_signals))
+
 
 @dashboard_bp.route('/api/manager')
 def api_manager():
@@ -286,10 +288,12 @@ def api_manager():
             }
     return jsonify(groups)
 
+
 @dashboard_bp.route('/api/market')
 def api_market():
     data = _run_async(_compute_market_state())
     if data is None:
+        # Fallback to last signal
         with _state_lock:
             if not recent_signals:
                 return jsonify({
@@ -308,6 +312,7 @@ def api_market():
                 "status": "FALLBACK"
             })
     return jsonify(data)
+
 
 @dashboard_bp.route('/api/performance')
 def api_performance():
@@ -328,6 +333,7 @@ def api_performance():
             "win_rate": 0, "profit_factor": 0,
             "max_drawdown_percent": 0, "avg_rr": 0, "recovery_factor": 0
         })
+
 
 @dashboard_bp.route('/dashboard')
 def dashboard_page():
