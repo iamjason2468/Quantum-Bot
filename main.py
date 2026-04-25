@@ -51,13 +51,6 @@ if not TOKEN:
 if not MY_ACC_ID:
     logger.error("❌ MY_ACCOUNT_ID is not set")
 
-logger.info(f"📊 Lot Multiplier: {LOT_MULTIPLIER}x")
-logger.info(f"🛡️ Daily Loss Limit: {MAX_LOSS_PCT}% (Cooldown: {COOLDOWN_MINUTES}min)")
-logger.info(f"📏 Min Distance: Gold {MIN_DISTANCE_PIPS_GOLD} pips")
-logger.info(f"🪙 Gold BE: {GOLD_BE_ATR} ATR (baseline) | Trail Start: {GOLD_TRAIL_START} | Trail Dist: {GOLD_TRAIL_DIST}")
-logger.info(f"🪙 Adaptive risk scaling: ON (Efficiency Ratio only)")
-logger.info(f"🪙 Max Spread: {MAX_SPREAD_PIPS} pips")
-
 # ------------------------------------------------------------------
 # PERSISTENT STATE
 # ------------------------------------------------------------------
@@ -88,6 +81,20 @@ last_trade_price = {}
 daily_start_balance = {}
 cooldown_until = None
 recent_signals = deque(maxlen=10)
+
+# Current market intelligence (updated via separate webhook)
+current_market_data = {
+    "bull_pct": 0,
+    "bear_pct": 0,
+    "adx": 0,
+    "bias": "NEUTRAL",
+    "smart_filter": "OFF",
+    "trend": "WEAK",
+    "status": "WAITING"
+}
+
+# Equity history for sparkline (stored every 10 seconds)
+equity_history = deque(maxlen=288)  # 288 points = 48 minutes at 10s intervals
 
 breakeven_done_global = set()
 trail_updated_global = {}
@@ -587,12 +594,18 @@ async def position_manager_loop(account_id):
                                 logger.info(f"📉 Trailing: SL of {position_id} moved to {new_sl}")
                                 trail_updated[position_id] = new_sl
 
+            # Update globals for dashboard
             with state_lock:
                 breakeven_done_global = breakeven_done.copy()
                 trail_updated_global = trail_updated.copy()
                 post_tp1_active_global = post_tp1_active.copy()
                 tp1_hit_tracking_global = tp1_hit_tracking.copy()
                 tp_removed_global = tp_removed.copy()
+
+            # Update equity history (balance already fetched indirectly, but we can grab it now)
+            balance = await fetch_account_balance(account_id)
+            if balance is not None:
+                equity_history.append({"time": datetime.utcnow().isoformat(), "balance": balance})
 
             await asyncio.sleep(5)
 
@@ -640,7 +653,7 @@ init_dashboard(
     get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS,
     daily_start_balance, cooldown_until, recent_signals,
     post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global,
-    get_connection
+    get_connection, current_market_data, equity_history
 )
 
 # ------------------------------------------------------------------
@@ -685,7 +698,6 @@ def webhook():
             "entry": entry,
             "status": "PENDING",
             "reason": "",
-            # New fields from Pine Script
             "bull_pct": data.get("bull_pct", 0),
             "bear_pct": data.get("bear_pct", 0),
             "adx": data.get("adx", 0),
@@ -757,6 +769,30 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+# --- NEW: Market webhook (no trade, just updates market data) ---
+@app.route('/market_webhook', methods=['POST'])
+def market_webhook():
+    global current_market_data
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "error", "message": "No JSON"}), 400
+
+        current_market_data = {
+            "bull_pct": float(data.get("bull_pct", 0)),
+            "bear_pct": float(data.get("bear_pct", 0)),
+            "adx": float(data.get("adx", 0)),
+            "bias": data.get("bias", "NEUTRAL"),
+            "smart_filter": data.get("smart_filter", "OFF"),
+            "trend": data.get("trend", "WEAK"),
+            "status": data.get("status", "WAITING")
+        }
+        logger.info(f"📊 Market data updated: {current_market_data}")
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Market webhook error: {e}")
+        return jsonify({"status": "error"}), 500
 
 # ------------------------------------------------------------------
 # MAIN
