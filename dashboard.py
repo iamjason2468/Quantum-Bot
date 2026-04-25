@@ -79,7 +79,8 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
         return None
 
     conn = await _get_connection_raw(MY_ACC_ID)
-    candles = await conn.get_candles(symbol, timeframe, 100)
+    # FIXED: get_candle (singular) not get_candles
+    candles = await conn.get_candle(symbol, timeframe, 100)
     if not candles or len(candles) < 50:
         return None
 
@@ -364,7 +365,6 @@ def api_performance():
 
         # Recovery factor = net profit / max drawdown
         if max_dd > 0 and net_profit != 0 and len(_closed_trade_pnls) > 0:
-            # Convert drawdown to dollar amount using initial balance
             if _equity_history and len(_equity_history) > 0:
                 start_balance = _equity_history[0]['balance']
                 max_dd_dollar = max_dd / 100 * start_balance
