@@ -172,8 +172,8 @@
                         </tr>
                     </tbody>
                 </table>
-                <div style="margin-top: 15px; font-size: 0.7rem; color: var(--accent-orange); background: rgba(255,159,0,0.05); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,159,0,0.2);">
-                    ⚙️ <b>Trailing Status:</b> SL moves to 2341.50 once Gold hits 2348.00.
+                <div id="trailing-status" style="margin-top: 15px; font-size: 0.7rem; color: var(--accent-orange); background: rgba(255,159,0,0.05); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,159,0,0.2);">
+                    ⚙️ <b>Trailing Status:</b> Waiting for data...
                 </div>
             </div>
         </div>
@@ -342,6 +342,58 @@
             if (totalProfitEl) totalProfitEl.innerText = '—';
         }
 
+        // Draw equity sparkline from /api/equity_history
+        function updateSparkline(data) {
+            const svg = document.querySelector('.sparkline');
+            if (!svg || !data || data.length < 2) return;
+
+            const balances = data.map(d => d.balance);
+            const min = Math.min(...balances);
+            const max = Math.max(...balances);
+            const range = max - min || 1;
+
+            const width = 400;
+            const height = 100;
+            const padding = 5;
+            const xStep = (width - 2 * padding) / (balances.length - 1);
+
+            let path = `M${padding},${height - padding - ((balances[0] - min) / range) * (height - 2 * padding)}`;
+            for (let i = 1; i < balances.length; i++) {
+                const x = padding + i * xStep;
+                const y = height - padding - ((balances[i] - min) / range) * (height - 2 * padding);
+                path += ` L${x},${y}`;
+            }
+            svg.setAttribute('d', path);
+        }
+
+        // Update trailing status line from /api/manager
+        async function updateTrailingStatus() {
+            try {
+                const res = await fetch('/api/manager');
+                const data = await res.json();
+                const keys = Object.keys(data);
+                const trailingDiv = document.getElementById('trailing-status');
+                if (!trailingDiv) return;
+
+                // Look for the first group with trailing_active = true
+                let trailingGroup = null;
+                for (const key of keys) {
+                    if (data[key].trailing_active) {
+                        trailingGroup = { key, ...data[key] };
+                        break;
+                    }
+                }
+
+                if (trailingGroup) {
+                    trailingDiv.innerHTML = `⚙️ <b>Trailing Active:</b> Group ${trailingGroup.key} — SL is being trailed`;
+                    trailingDiv.style.color = 'var(--accent-green)';
+                } else {
+                    trailingDiv.innerHTML = `⚙️ <b>Trailing Status:</b> No active trailing`;
+                    trailingDiv.style.color = 'var(--accent-orange)';
+                }
+            } catch(e) { console.error('Trailing status error:', e); }
+        }
+
         async function refreshAllData() {
             console.log('[Dashboard] Refreshing data from API...');
             
@@ -355,18 +407,19 @@
             if (balanceEl) balanceEl.innerHTML = '<span style="opacity:0.6;">$---</span>';
             if (pnlDiv) pnlDiv.innerHTML = 'Loading P&L...';
             if (spreadEl) spreadEl.innerHTML = 'Spread: --';
-            if (positionsTbody) positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Loading positions...</td></tr>';
+            if (positionsTbody) positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Loading positions...<tr></table>';
             if (logConsole) logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⎯</span> Fetching signals...</div>';
             
             // Fetch all endpoints including new ones
-            const [statusData, accountData, positionsData, spreadData, signalsData, marketData, perfData] = await Promise.all([
+            const [statusData, accountData, positionsData, spreadData, signalsData, marketData, perfData, equityHistoryData] = await Promise.all([
                 fetchJSON('/api/status'),
                 fetchJSON('/api/account'),
                 fetchJSON('/api/positions', []),
                 fetchJSON('/api/spread'),
                 fetchJSON('/api/signals', []),
                 fetchJSON('/api/market'),
-                fetchJSON('/api/performance')
+                fetchJSON('/api/performance'),
+                fetchJSON('/api/equity_history', [])
             ]);
             
             lastSuccessfulFetch = Date.now();
@@ -458,7 +511,7 @@
                     positionsTbody.innerHTML = rowsHtml;
                 }
             } else if (positionsTbody) {
-                positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:red;">Error loading positions</td></tr>';
+                positionsTbody.innerHTML = '</table><td colspan="4" style="text-align:center; color:red;">Error loading positions</td></tr>';
             }
             
             // 5. Logs Console
@@ -489,11 +542,17 @@
                 logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⚠️</span> Failed to fetch signals</div>';
             }
             
-            // 6. Elite 11 Intelligence (new)
+            // 6. Elite 11 Intelligence
             updateMarketIntelligence(marketData);
             
-            // 7. Performance Breakdown (new)
+            // 7. Performance Breakdown
             updatePerformanceStats(perfData);
+            
+            // 8. Equity Sparkline
+            updateSparkline(equityHistoryData);
+            
+            // 9. Trailing Status
+            await updateTrailingStatus();
             
             // Stale data check
             setTimeout(() => {
