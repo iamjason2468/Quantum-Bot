@@ -1,7 +1,6 @@
 # dashboard.py
 from flask import Blueprint, jsonify, render_template
 from datetime import datetime
-import asyncio
 import time
 
 # Create the blueprint
@@ -23,22 +22,20 @@ post_tp1_active_global = None
 tp1_hit_tracking_global = None
 tp_removed_global = None
 
-# We'll reuse the connection helper and PIP_VALUE from main.py
-# but since main.py is not imported, we rely on get_connection being callable.
-# The actual get_connection is already accessible through the event loop.
-# We'll need a helper to run async functions – we already have _run_async.
-
-# We'll define a constant for the symbol used in market state
-GOLD_SYMBOL = "XAUUSD"
+# We'll use _get_connection_raw which will be set from main.py
+_get_connection_raw = None
 
 def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spread,
                    get_positions_for_api, my_acc_id, gold_suffix, max_spread_pips,
                    daily_start_bal, cooldown, recent_sigs,
-                   post_tp1_active, tp1_hit_tracking, tp_removed):
+                   post_tp1_active, tp1_hit_tracking, tp_removed,
+                   get_connection_raw=None):
+    """Call this from main.py to connect the dashboard to the bot's state."""
     global _state_lock, _run_async, _fetch_account_balance, _get_current_spread
     global _get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS
     global daily_start_balance, cooldown_until, recent_signals
-    global post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global, GOLD_SYMBOL
+    global post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
+    global _get_connection_raw
 
     _state_lock = state_lock
     _run_async = run_async
@@ -54,72 +51,49 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
     post_tp1_active_global = post_tp1_active
     tp1_hit_tracking_global = tp1_hit_tracking
     tp_removed_global = tp_removed
-    GOLD_SYMBOL = "XAUUSD" + GOLD_SUFFIX
+    _get_connection_raw = get_connection_raw
 
 # ------------------------------------------------------------------
-# Helper to get MetaApi connection (reuses the same event loop)
-# We assume the main loop is already running and get_connection is defined in main.py.
-# Since we only have the event loop, we can use the fact that main.py's get_connection
-# is already registered in the global scope of the running app. We'll access it via
-# the imported module indirectly. For simplicity, we call the same async function
-# through run_async, and we'll define a local async function that does the work.
-# To make it clean, we'll add a small async function here that mimics the logic.
-# ------------------------------------------------------------------
-
-async def _get_connection_async(account_id):
-    # This is a duplicate of the get_connection logic from main.py.
-    # Since we don't have direct access to the connection cache, we can
-    # rely on the fact that main.py already keeps connections alive.
-    # However, for the dashboard we'll just use the one from main.
-    # A hack: import the connections dict from main (but that would create
-    # a circular dependency). Instead, we'll use the keep_connection_alive
-    # already running and just call get_connection via the event loop.
-    # The simplest path is to call the original get_connection from main.py
-    # by using the fact it's accessible through the global namespace of the
-    # running script. We'll dynamically fetch it.
-    import main as main_module
-    return await main_module.get_connection(account_id)
-
-# ------------------------------------------------------------------
-# Market state calculation (real-time indicators)
+# Market state calculation (real-time indicators using existing connection)
 # ------------------------------------------------------------------
 async def _compute_market_state():
-    """Calculate current market indicators from 5‑minute candles."""
+    """Calculate current market indicators from 5‑minute candles using existing MetaApi connection."""
     try:
-        conn = await _get_connection_async(MY_ACC_ID)
-        # Fetch 100 candles of 5‑minute for XAUUSDm
-        candles = await conn.get_candles(GOLD_SYMBOL, '5m', 100)
+        if _get_connection_raw is None:
+            return None
+        
+        conn = await _get_connection_raw(MY_ACC_ID)
+        symbol = "XAUUSD" + GOLD_SUFFIX
+        
+        # Fetch 100 candles of 5‑minute
+        candles = await conn.get_candles(symbol, '5m', 100)
         if not candles or len(candles) < 50:
             return None
 
         closes = [c['close'] for c in candles]
         highs = [c['high'] for c in candles]
         lows = [c['low'] for c in candles]
+        volumes = [c.get('volume', 1) for c in candles]
 
-        # EMAs
+        # Helper: EMA
         def ema(data, length):
             alpha = 2 / (length + 1)
-            ema_vals = [data[0]]
+            result = [data[0]]
             for x in data[1:]:
-                ema_vals.append(alpha * x + (1 - alpha) * ema_vals[-1])
-            return ema_vals
+                result.append(alpha * x + (1 - alpha) * result[-1])
+            return result
 
+        # EMA9 and EMA21
         ema9_vals = ema(closes, 9)
         ema21_vals = ema(closes, 21)
-
         latest_ema9 = ema9_vals[-1]
         latest_ema21 = ema21_vals[-1]
-        prev_ema9 = ema9_vals[-2]
-        prev_ema21 = ema21_vals[-2]
-
-        # EMA cross status
         ema_cross = "BULL" if latest_ema9 > latest_ema21 else "BEAR"
 
-        # Simple VWAP approximation (from 5m typical price)
-        typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
-        volumes = [c['volume'] for c in candles]
-        vwap = sum(t * v for t, v in zip(typical_prices, volumes)) / sum(volumes) if sum(volumes) > 0 else 0
-        price_vs_vwap = "ABOVE" if closes[-1] > vwap else "BELOW"
+        # VWAP
+        typical = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+        vwap = sum(t * v for t, v in zip(typical, volumes)) / sum(volumes) if sum(volumes) > 0 else closes[-1]
+        price = closes[-1]
 
         # RSI 14
         def rsi(data, period=14):
@@ -127,70 +101,59 @@ async def _compute_market_state():
             losses = [max(data[i-1] - data[i], 0) for i in range(1, len(data))]
             avg_gain = sum(gains[:period]) / period
             avg_loss = sum(losses[:period]) / period
-            rs_values = []
-            for i in range(period, len(data)-1):
-                avg_gain = (avg_gain * (period-1) + gains[i]) / period
-                avg_loss = (avg_loss * (period-1) + losses[i]) / period
-                rs = avg_gain / avg_loss if avg_loss != 0 else 100
-                rs_values.append(100 - (100 / (1 + rs)))
-            return rs_values[-1] if rs_values else 50.0
+            if avg_loss == 0:
+                return 100.0
+            rs = avg_gain / avg_loss
+            return 100 - (100 / (1 + rs))
 
         rsi_val = rsi(closes)
-        rsi5m_val = rsi_val  # Since we're already on 5m
 
         # MACD (12,26,9)
-        def ema_series(data, length):
-            return ema(data, length)
-
-        ema12 = ema_series(closes, 12)
-        ema26 = ema_series(closes, 26)
+        ema12 = ema(closes, 12)
+        ema26 = ema(closes, 26)
         macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
-        signal_line = ema_series(macd_line, 9)
-        macd_status = "BULL" if macd_line[-1] > signal_line[-1] else "BEAR"
+        signal_line = ema(macd_line, 9)
+        macd_bull = macd_line[-1] > signal_line[-1]
 
-        # ADX (14)
-        def dmi(highs, lows, closes, period=14):
-            tr = []
-            plus_dm = []
-            minus_dm = []
-            for i in range(1, len(highs)):
-                h_diff = highs[i] - highs[i-1]
-                l_diff = lows[i-1] - lows[i]
-                tr.append(max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])))
-                plus_dm.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
-                minus_dm.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
-            atr = ema_series(tr, period)[-1]
-            plus_di = (ema_series(plus_dm, period)[-1] / atr) * 100
-            minus_di = (ema_series(minus_dm, period)[-1] / atr) * 100
-            dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-            adx = ema_series([dx], period)[-1]
-            return adx, plus_di, minus_di
+        # ADX (14) - simplified
+        tr_vals = []
+        plus_dm = []
+        minus_dm = []
+        for i in range(1, len(highs)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            tr_vals.append(tr)
+            up = highs[i] - highs[i-1]
+            down = lows[i-1] - lows[i]
+            plus_dm.append(up if up > down and up > 0 else 0)
+            minus_dm.append(down if down > up and down > 0 else 0)
+        atr_val = ema(tr_vals, 14)[-1] if len(tr_vals) >= 14 else 1
+        plus_di = (ema(plus_dm, 14)[-1] / atr_val * 100) if atr_val > 0 else 0
+        minus_di = (ema(minus_dm, 14)[-1] / atr_val * 100) if atr_val > 0 else 0
+        dx_sum = abs(plus_di - minus_di)
+        dx_den = plus_di + minus_di
+        dx = dx_sum / dx_den * 100 if dx_den > 0 else 0
+        adx_val = dx
 
-        adx_val, plus_di, minus_di = dmi(highs, lows, closes)
-
-        # Smart filter logic (replicate Pine script)
+        # Smart Filter
         ema50_vals = ema(closes, 50)
         ema50 = ema50_vals[-1]
-        price = closes[-1]
         htf_bull = price > ema50
         htf_bear = price < ema50
-
-        # Weak/strong based on ADX
         strong_trend = adx_val > 25
         weak_trend = adx_val < 20
 
-        # Reversal detection (simplified: EMA slope flattening + price > EMA9)
-        ema_slope = ema50_vals[-1] - ema50_vals[-4]  # 3‑bar slope
+        # EMA slope (3-bar)
+        slope_now = ema50_vals[-1] - ema50_vals[-4] if len(ema50_vals) >= 4 else 0
         slope_prev = ema50_vals[-2] - ema50_vals[-5] if len(ema50_vals) >= 5 else 0
-        trend_weakening_bear = htf_bear and ema_slope > slope_prev and price > latest_ema9
-        trend_weakening_bull = htf_bull and ema_slope < slope_prev and price < latest_ema9
 
-        allow_buy = htf_bull or (htf_bear and trend_weakening_bear)
-        allow_sell = htf_bear or (htf_bull and trend_weakening_bull)
+        weakening_bear = htf_bear and slope_now > slope_prev and price > latest_ema9
+        weakening_bull = htf_bull and slope_now < slope_prev and price < latest_ema9
 
-        # Smart filter status string
+        allow_buy = htf_bull or (htf_bear and weakening_bear)
+        allow_sell = htf_bear or (htf_bull and weakening_bull)
+
         if allow_buy and allow_sell:
-            smart_filter = "REVERSAL WINDOW" if (htf_bear and trend_weakening_bear) or (htf_bull and trend_weakening_bull) else "NEUTRAL"
+            smart_filter = "REVERSAL WINDOW" if (weakening_bear or weakening_bull) else "NEUTRAL"
         elif allow_buy:
             smart_filter = "BULL BIAS"
         elif allow_sell:
@@ -198,28 +161,27 @@ async def _compute_market_state():
         else:
             smart_filter = "BLOCKED"
 
-        # Bias scores (simplified: count bullish/bearish conditions)
+        # Bias scores (simplified)
         b_score = 0
-        b_max = 0
-        b_score += 1 if price > vwap else 0; b_max += 1
-        b_score += 1 if rsi_val > 50 else 0; b_max += 1
-        b_score += 1 if macd_line[-1] > signal_line[-1] else 0; b_max += 1
-        b_score += 1 if latest_ema9 > latest_ema21 else 0; b_max += 1
-        b_score += 1 if (adx_val > 25 and price > latest_ema9) else 0; b_max += 1
-        b_score += 1 if rsi5m_val > 50 else 0; b_max += 1
-        bull_pct = (b_score / b_max * 100) if b_max else 0
+        b_max = 6
+        b_score += 1 if price > vwap else 0
+        b_score += 1 if rsi_val > 50 else 0
+        b_score += 1 if macd_bull else 0
+        b_score += 1 if latest_ema9 > latest_ema21 else 0
+        b_score += 1 if (adx_val > 25 and price > latest_ema9) else 0
+        b_score += 1 if rsi_val > 50 else 0  # rsi5m same
+        bull_pct = round(b_score / b_max * 100)
 
         r_score = 0
-        r_max = 0
-        r_score += 1 if price < vwap else 0; r_max += 1
-        r_score += 1 if rsi_val < 50 else 0; r_max += 1
-        r_score += 1 if macd_line[-1] < signal_line[-1] else 0; r_max += 1
-        r_score += 1 if latest_ema9 < latest_ema21 else 0; r_max += 1
-        r_score += 1 if (adx_val > 25 and price < latest_ema9) else 0; r_max += 1
-        r_score += 1 if rsi5m_val < 50 else 0; r_max += 1
-        bear_pct = (r_score / r_max * 100) if r_max else 0
+        r_max = 6
+        r_score += 1 if price < vwap else 0
+        r_score += 1 if rsi_val < 50 else 0
+        r_score += 1 if not macd_bull else 0
+        r_score += 1 if latest_ema9 < latest_ema21 else 0
+        r_score += 1 if (adx_val > 25 and price < latest_ema9) else 0
+        r_score += 1 if rsi_val < 50 else 0
+        bear_pct = round(r_score / r_max * 100)
 
-        # Bias text
         diff = bull_pct - bear_pct
         if diff >= 40:
             bias_text = "STRONG BULL"
@@ -230,7 +192,6 @@ async def _compute_market_state():
         else:
             bias_text = "MILD BEAR"
 
-        # Trend strength label
         if adx_val > 30:
             trend_strength = "STRONG"
         elif adx_val > 22:
@@ -238,31 +199,17 @@ async def _compute_market_state():
         else:
             trend_strength = "WEAK"
 
-        # Logic dots (just color status for the 9 indicators)
-        # We'll create a dict with dot colors for EMA, MACD, ADX Pwr, etc.
-        dots = {
-            "EMA": "red-glow" if ema_cross == "BEAR" else "green-glow",
-            "MACD": "red-glow" if macd_status == "BEAR" else "green-glow",
-            "ADX Pwr": "green-glow" if adx_val > 25 else "gray-dot",
-            "Hard ADX": "gray-dot",  # not used
-            "Vol Stat": "green-glow" if sum(volumes[-5:]) > sum(volumes[-10:-5]) else "gray-dot",
-            "Trend Pwr": "green-glow" if trend_strength == "STRONG" else ("red-glow" if trend_strength == "WEAK" else "gray-dot"),
-            "VWAP": "red-glow" if price < vwap else "green-glow",
-            "Trend": "red-glow" if htf_bear else "green-glow",
-            "Smart Filter": smart_filter
-        }
-
         return {
-            "bull_pct": round(bull_pct),
-            "bear_pct": round(bear_pct),
+            "bull_pct": bull_pct,
+            "bear_pct": bear_pct,
             "adx": round(adx_val, 1),
             "bias": bias_text,
             "smart_filter": smart_filter,
             "trend": trend_strength,
             "ema_cross": ema_cross,
-            "macd_status": macd_status,
+            "macd_bull": macd_bull,
             "rsi": round(rsi_val, 1),
-            "dots": dots,
+            "vwap_bull": price > vwap,
             "status": "LIVE"
         }
     except Exception as e:
@@ -270,7 +217,7 @@ async def _compute_market_state():
         return None
 
 # ------------------------------------------------------------------
-# API ENDPOINTS (updated)
+# API ENDPOINTS
 # ------------------------------------------------------------------
 
 @dashboard_bp.route('/api/status')
@@ -310,7 +257,7 @@ def api_positions():
 
 @dashboard_bp.route('/api/spread')
 def api_spread():
-    symbol = GOLD_SYMBOL
+    symbol = "XAUUSD" + GOLD_SUFFIX
     spread_pips = _run_async(_get_current_spread(symbol))
     return jsonify({
         "symbol": symbol,
@@ -339,23 +286,16 @@ def api_manager():
             }
     return jsonify(groups)
 
-# NEW: Real‑time market intelligence
 @dashboard_bp.route('/api/market')
 def api_market():
-    # Run the async computation
     data = _run_async(_compute_market_state())
     if data is None:
-        # Fallback to last signal if computation fails
         with _state_lock:
             if not recent_signals:
                 return jsonify({
-                    "bull_pct": 0,
-                    "bear_pct": 0,
-                    "adx": 0,
-                    "bias": "NO SIGNALS",
-                    "smart_filter": "OFF",
-                    "trend": "WEAK",
-                    "status": "WAITING"
+                    "bull_pct": 0, "bear_pct": 0, "adx": 0,
+                    "bias": "NO SIGNALS", "smart_filter": "OFF",
+                    "trend": "WEAK", "status": "WAITING"
                 })
             last = recent_signals[-1]
             return jsonify({
@@ -375,29 +315,18 @@ def api_performance():
         total = len(recent_signals)
         if total == 0:
             return jsonify({
-                "total_trades": 0,
-                "executed": 0,
-                "blocked": 0,
-                "error": 0,
-                "win_rate": 0,
-                "profit_factor": 0,
-                "max_drawdown_percent": 0,
-                "avg_rr": 0,
-                "recovery_factor": 0
+                "total_trades": 0, "executed": 0, "blocked": 0,
+                "error": 0, "win_rate": 0, "profit_factor": 0,
+                "max_drawdown_percent": 0, "avg_rr": 0, "recovery_factor": 0
             })
         executed = sum(1 for s in recent_signals if s.get("status") == "EXECUTED")
         blocked = sum(1 for s in recent_signals if s.get("status", "").startswith("BLOCKED"))
         errors = total - executed - blocked
         return jsonify({
-            "total_trades": total,
-            "executed": executed,
-            "blocked": blocked,
-            "error": errors,
-            "win_rate": 0,
-            "profit_factor": 0,
-            "max_drawdown_percent": 0,
-            "avg_rr": 0,
-            "recovery_factor": 0
+            "total_trades": total, "executed": executed,
+            "blocked": blocked, "error": errors,
+            "win_rate": 0, "profit_factor": 0,
+            "max_drawdown_percent": 0, "avg_rr": 0, "recovery_factor": 0
         })
 
 @dashboard_bp.route('/dashboard')
