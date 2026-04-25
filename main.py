@@ -675,7 +675,7 @@ def webhook():
         action = data.get('action', 'buy').lower()
         entry = float(data.get('entry', 0))
 
-        // --- Store signal info and market intelligence early ---
+        # Store signal info and market intelligence early
         signal_time = datetime.utcnow().strftime('%H:%M:%S')
         signal_record = {
             "time": signal_time,
@@ -684,7 +684,7 @@ def webhook():
             "entry": entry,
             "status": "PENDING",
             "reason": "",
-            // New fields from Pine Script
+            # New fields from Pine Script
             "bull_pct": data.get("bull_pct", 0),
             "bear_pct": data.get("bear_pct", 0),
             "adx": data.get("adx", 0),
