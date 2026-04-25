@@ -675,14 +675,44 @@ def webhook():
         action = data.get('action', 'buy').lower()
         entry = float(data.get('entry', 0))
 
+        // --- Store signal info and market intelligence early ---
+        signal_time = datetime.utcnow().strftime('%H:%M:%S')
+        signal_record = {
+            "time": signal_time,
+            "symbol": final_symbol,
+            "action": action.upper(),
+            "entry": entry,
+            "status": "PENDING",
+            "reason": "",
+            // New fields from Pine Script
+            "bull_pct": data.get("bull_pct", 0),
+            "bear_pct": data.get("bear_pct", 0),
+            "adx": data.get("adx", 0),
+            "bias_text": data.get("bias_text", "NEUTRAL"),
+            "smart_filter": data.get("smart_filter", "OFF"),
+            "trend_strength": data.get("trend_strength", "WEAK")
+        }
+
         if not can_trade(final_symbol, entry, action.upper()):
+            signal_record["status"] = "BLOCKED_MIN_DIST"
+            signal_record["reason"] = "min_distance"
+            with state_lock:
+                recent_signals.append(signal_record)
             return jsonify({"status": "blocked", "reason": "min_distance"}), 200
 
         balance = run_async(fetch_account_balance(target_id))
         if balance is None:
             logger.error("❌ Cannot fetch account balance – aborting trade")
+            signal_record["status"] = "ERROR"
+            signal_record["reason"] = "balance_fetch_failed"
+            with state_lock:
+                recent_signals.append(signal_record)
             return jsonify({"status": "error", "message": "Cannot fetch account balance"}), 500
         if not check_daily_loss_limit(balance):
+            signal_record["status"] = "BLOCKED_LOSS_LIMIT"
+            signal_record["reason"] = "daily_loss_limit"
+            with state_lock:
+                recent_signals.append(signal_record)
             return jsonify({"status": "blocked", "reason": "daily_loss_limit"}), 200
 
         volume = float(data.get('volume', 0.01))
@@ -705,6 +735,15 @@ def webhook():
                 sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive
             )
         )
+
+        if "error" in result:
+            signal_record["status"] = "ERROR"
+            signal_record["reason"] = result.get("error", "unknown")
+        else:
+            signal_record["status"] = "EXECUTED"
+
+        with state_lock:
+            recent_signals.append(signal_record)
 
         return jsonify({
             "status": "success",
