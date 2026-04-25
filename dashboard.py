@@ -25,6 +25,7 @@ tp_removed_global = None
 _get_connection_raw = None
 _market_data = None          # live market state from TradingView (5m)
 _equity_history = None       # deque of balance snapshots
+_closed_trade_pnls = None    # deque of closed trade P&L values
 
 # Cache for per‑timeframe market states (MetaApi‑computed)
 _market_cache = {}
@@ -35,13 +36,14 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
                    get_positions_for_api, my_acc_id, gold_suffix, max_spread_pips,
                    daily_start_bal, cooldown, recent_sigs,
                    post_tp1_active, tp1_hit_tracking, tp_removed,
-                   get_connection_raw=None, market_data=None, equity_history=None):
+                   get_connection_raw=None, market_data=None, equity_history=None,
+                   closed_trade_pnls=None):
     """Call this from main.py to connect the dashboard to the bot's state."""
     global _state_lock, _run_async, _fetch_account_balance, _get_current_spread
     global _get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS
     global daily_start_balance, cooldown_until, recent_signals
     global post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
-    global _get_connection_raw, _market_data, _equity_history
+    global _get_connection_raw, _market_data, _equity_history, _closed_trade_pnls
 
     _state_lock = state_lock
     _run_async = run_async
@@ -60,6 +62,7 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
     _get_connection_raw = get_connection_raw
     _market_data = market_data
     _equity_history = equity_history
+    _closed_trade_pnls = closed_trade_pnls
 
 
 # ------------------------------------------------------------------
@@ -76,7 +79,6 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
         return None
 
     conn = await _get_connection_raw(MY_ACC_ID)
-    # We fetch 100 candles; enough for all indicators
     candles = await conn.get_candles(symbol, timeframe, 100)
     if not candles or len(candles) < 50:
         return None
@@ -86,7 +88,6 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     lows = [c['low'] for c in candles]
     volumes = [c.get('volume', 1) for c in candles]
 
-    # Helper: EMA
     def ema(data, length):
         alpha = 2 / (length + 1)
         res = [data[0]]
@@ -100,33 +101,23 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     latest_ema21 = ema21_vals[-1]
     ema_cross = "BULL" if latest_ema9 > latest_ema21 else "BEAR"
 
-    # VWAP
     typical = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
     vwap = sum(t * v for t, v in zip(typical, volumes)) / sum(volumes) if sum(volumes) > 0 else closes[-1]
     price = closes[-1]
 
-    # RSI 14
     gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
     losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
     avg_gain = sum(gains[:14]) / 14
     avg_loss = sum(losses[:14]) / 14
-    if avg_loss == 0:
-        rsi_val = 100.0
-    else:
-        rs = avg_gain / avg_loss
-        rsi_val = 100 - (100 / (1 + rs))
+    rsi_val = 100.0 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
 
-    # MACD (12,26,9)
     ema12 = ema(closes, 12)
     ema26 = ema(closes, 26)
     macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
     signal_line = ema(macd_line, 9)
     macd_bull = macd_line[-1] > signal_line[-1]
 
-    # ADX (14) simplified
-    tr_vals = []
-    plus_dm = []
-    minus_dm = []
+    tr_vals, plus_dm, minus_dm = [], [], []
     for i in range(1, len(highs)):
         tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
         tr_vals.append(tr)
@@ -137,10 +128,8 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     atr_val = ema(tr_vals, 14)[-1] if len(tr_vals) >= 14 else 1
     plus_di = (ema(plus_dm, 14)[-1] / atr_val * 100) if atr_val > 0 else 0
     minus_di = (ema(minus_dm, 14)[-1] / atr_val * 100) if atr_val > 0 else 0
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
-    adx_val = dx
+    adx_val = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
 
-    # Smart Filter (using EMA50)
     ema50_vals = ema(closes, 50)
     ema50 = ema50_vals[-1]
     htf_bull = price > ema50
@@ -166,23 +155,10 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     else:
         smart_filter = "BLOCKED"
 
-    # Bias scores (simplified)
-    b_score = sum([
-        price > vwap,
-        rsi_val > 50,
-        macd_bull,
-        latest_ema9 > latest_ema21,
-        adx_val > 25 and price > latest_ema9,
-        rsi_val > 50
-    ])
-    r_score = sum([
-        price < vwap,
-        rsi_val < 50,
-        not macd_bull,
-        latest_ema9 < latest_ema21,
-        adx_val > 25 and price < latest_ema9,
-        rsi_val < 50
-    ])
+    b_score = sum([price > vwap, rsi_val > 50, macd_bull, latest_ema9 > latest_ema21,
+                   adx_val > 25 and price > latest_ema9, rsi_val > 50])
+    r_score = sum([price < vwap, rsi_val < 50, not macd_bull, latest_ema9 < latest_ema21,
+                   adx_val > 25 and price < latest_ema9, rsi_val < 50])
     bull_pct = round(b_score / 6 * 100)
     bear_pct = round(r_score / 6 * 100)
 
@@ -196,12 +172,7 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     else:
         bias_text = "MILD BEAR"
 
-    if adx_val > 30:
-        trend_strength = "STRONG"
-    elif adx_val > 22:
-        trend_strength = "MODERATE"
-    else:
-        trend_strength = "WEAK"
+    trend_strength = "STRONG" if adx_val > 30 else "MODERATE" if adx_val > 22 else "WEAK"
 
     result = {
         "bull_pct": bull_pct,
@@ -303,7 +274,6 @@ def api_market():
     data = _run_async(compute_market_state_for_tf(symbol, timeframe))
     if data:
         return jsonify(data)
-    # Fallback to the stored market webhook data, or a default
     if _market_data is not None:
         return jsonify(_market_data)
     return jsonify({
@@ -356,7 +326,31 @@ def api_performance():
         blocked = sum(1 for s in recent_signals if s.get("status", "").startswith("BLOCKED"))
         errors = total - executed - blocked
 
-        # Max drawdown from equity history
+        # Real trade outcomes from closed trade P&Ls
+        win_rate = 0
+        profit_factor = 0
+        avg_rr = 0
+        net_profit = 0
+        recovery_factor = 0
+
+        if _closed_trade_pnls and len(_closed_trade_pnls) > 0:
+            wins = [p for p in _closed_trade_pnls if p > 0]
+            losses = [abs(p) for p in _closed_trade_pnls if p < 0]
+            win_rate = round(len(wins) / len(_closed_trade_pnls) * 100, 1)
+
+            gross_profit = sum(wins)
+            gross_loss = sum(losses)
+            if gross_loss > 0:
+                profit_factor = round(gross_profit / gross_loss, 2)
+
+            if len(losses) > 0 and len(wins) > 0:
+                avg_win = sum(wins) / len(wins)
+                avg_loss = sum(losses) / len(losses)
+                avg_rr = round(avg_win / avg_loss, 2)
+
+            net_profit = sum(_closed_trade_pnls)
+
+        # Max drawdown from equity curve
         max_dd = 0
         if _equity_history and len(_equity_history) > 1:
             balances = [h['balance'] for h in _equity_history]
@@ -368,17 +362,25 @@ def api_performance():
                 if dd > max_dd:
                     max_dd = dd
 
-        # Win rate, profit factor, avg R:R remain 0 until we track per‑trade outcomes
+        # Recovery factor = net profit / max drawdown
+        if max_dd > 0 and net_profit != 0 and len(_closed_trade_pnls) > 0:
+            # Convert drawdown to dollar amount using initial balance
+            if _equity_history and len(_equity_history) > 0:
+                start_balance = _equity_history[0]['balance']
+                max_dd_dollar = max_dd / 100 * start_balance
+                if max_dd_dollar > 0:
+                    recovery_factor = round(net_profit / max_dd_dollar, 2)
+
         return jsonify({
             "total_trades": total,
             "executed": executed,
             "blocked": blocked,
             "error": errors,
-            "win_rate": 0,
-            "profit_factor": 0,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
             "max_drawdown_percent": round(max_dd, 2),
-            "avg_rr": 0,
-            "recovery_factor": 0
+            "avg_rr": avg_rr,
+            "recovery_factor": recovery_factor
         })
 
 
