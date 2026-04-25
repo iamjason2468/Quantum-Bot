@@ -17,7 +17,6 @@
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { background-color: var(--bg); color: var(--text-main); font-family: 'Inter', sans-serif; padding: 15px; overflow-x: hidden; }
 
-        /* Header & Health Pulse */
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         .logo { font-weight: 800; letter-spacing: -1px; font-size: 1.1rem; }
         .logo span { color: var(--accent-gold); }
@@ -41,12 +40,10 @@
             50% { opacity: 1; transform: scale(1.1); }
         }
 
-        /* Navigation */
         .nav-tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; overflow-x: auto; }
         .tab { padding: 10px 15px; border-radius: 8px; cursor: pointer; color: var(--text-dim); font-size: 0.75rem; font-weight: 700; transition: 0.2s; text-transform: uppercase; white-space: nowrap; }
         .tab.active { background: var(--card-bg); color: var(--accent-gold); border: 1px solid var(--border); }
 
-        /* Page Layout */
         .page { display: none; animation: fadeIn 0.3s ease; }
         .page.active { display: block; }
         .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; }
@@ -54,7 +51,6 @@
         .wide-card { grid-column: span 2; }
         .card-label { color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
 
-        /* Intelligence Specific UI */
         .tf-header { display: flex; justify-content: center; gap: 6px; margin-bottom: 20px; }
         .tf-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: rgba(255,255,255,0.03); color: var(--text-dim); font-size: 0.6rem; font-weight: 700; cursor: pointer; }
         .tf-btn.active { border-color: var(--accent-gold); color: var(--accent-gold); background: rgba(255,215,0,0.05); }
@@ -72,7 +68,6 @@
         .logic-val { font-size: 0.6rem; font-weight: 800; }
         .dot { width: 5px; height: 5px; border-radius: 50%; }
 
-        /* General UI Elements */
         .spread-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: var(--text-dim); border: 1px solid var(--border); }
         .spread-high { color: var(--accent-red) !important; border-color: var(--accent-red) !important; background: rgba(255, 77, 77, 0.1) !important; }
         .curve-container { margin: 10px 0; background: rgba(0, 0, 0, 0.4); border-radius: 12px; padding: 15px; }
@@ -130,7 +125,10 @@
             <div class="card">
                 <div class="card-label" style="text-align: center;">Elite 11 Intelligence</div>
                 <div class="tf-header">
-                    <div class="tf-btn">5m</div><div class="tf-btn active">15m</div><div class="tf-btn">1H</div><div class="tf-btn">1D</div>
+                    <div class="tf-btn" data-timeframe="5m">5m</div>
+                    <div class="tf-btn active" data-timeframe="15m">15m</div>
+                    <div class="tf-btn" data-timeframe="1H">1H</div>
+                    <div class="tf-btn" data-timeframe="1D">1D</div>
                 </div>
                 <div class="gauge-box">
                     <div class="gauge-arc"></div>
@@ -144,14 +142,14 @@
                         <div class="score-item"><div class="logic-label" style="color:var(--accent-green)">Bull</div><div id="bullPercent" class="logic-val">17%</div></div>
                         <div class="score-item"><div class="logic-label" style="color:var(--accent-red)">Bear</div><div id="bearPercent" class="logic-val">67%</div></div>
                     </div>
-                    <div class="logic-item"><span class="logic-label">EMA</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item"><span class="logic-label">MACD</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item"><span class="logic-label">ADX Pwr</span><div class="dot green-glow"></div></div>
-                    <div class="logic-item"><span class="logic-label">Hard ADX</span><div class="dot gray-dot"></div></div>
-                    <div class="logic-item"><span class="logic-label">Vol Stat</span><div class="dot green-glow"></div></div>
-                    <div class="logic-item"><span class="logic-label">Trend Pwr</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item"><span class="logic-label">VWAP</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item"><span class="logic-label">Trend</span><div class="dot red-glow"></div></div>
+                    <div class="logic-item" data-indicator="ema"><span class="logic-label">EMA</span><div class="dot red-glow"></div></div>
+                    <div class="logic-item" data-indicator="macd"><span class="logic-label">MACD</span><div class="dot red-glow"></div></div>
+                    <div class="logic-item" data-indicator="adx_power"><span class="logic-label">ADX Pwr</span><div class="dot green-glow"></div></div>
+                    <div class="logic-item" data-indicator="hard_adx"><span class="logic-label">Hard ADX</span><div class="dot gray-dot"></div></div>
+                    <div class="logic-item" data-indicator="vol_stat"><span class="logic-label">Vol Stat</span><div class="dot green-glow"></div></div>
+                    <div class="logic-item" data-indicator="trend_power"><span class="logic-label">Trend Pwr</span><div class="dot red-glow"></div></div>
+                    <div class="logic-item" data-indicator="vwap"><span class="logic-label">VWAP</span><div class="dot red-glow"></div></div>
+                    <div class="logic-item" data-indicator="trend"><span class="logic-label">Trend</span><div class="dot red-glow"></div></div>
                     <div class="logic-item" style="grid-column: span 2;"><span class="logic-label">Smart Filter</span><span id="smartFilterVal" class="logic-val" style="color:var(--accent-red)">BEAR BIAS</span></div>
                 </div>
                 <div id="statusWait" style="margin-top: 12px; padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); text-align: center; font-size: 0.7rem; font-weight: 900;">STATUS: WAIT</div>
@@ -164,12 +162,7 @@
                         <tr><th>Ticket</th><th>Entry / Now</th><th>SL / TP</th><th>PnL</th></tr>
                     </thead>
                     <tbody id="positionsTableBody">
-                        <tr>
-                            <td>#882104<br><b style="color:var(--accent-gold)">BUY 0.15</b></td>
-                            <td><span class="price-tag">2342.50</span><br><small style="color:var(--text-dim)">2343.80</small></td>
-                            <td><span style="color:var(--accent-red)">2338.0</span> / <span style="color:var(--accent-green)">2355.0</span></td>
-                            <td style="color:var(--accent-green); font-weight:bold;">+$19.50</td>
-                        </tr>
+                        <tr><td colspan="4" style="text-align:center;">Loading positions...</td></tr>
                     </tbody>
                 </table>
                 <div id="trailing-status" style="margin-top: 15px; font-size: 0.7rem; color: var(--accent-orange); background: rgba(255,159,0,0.05); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,159,0,0.2);">
@@ -190,34 +183,32 @@
 
             <div class="card wide-card">
                 <div class="card-label">Performance Breakdown</div>
-                <div class="stat-row"><span class="stat-name">Total Profit</span><span id="totalProfit" class="stat-value-sm" style="color:var(--accent-green)">+$342.10</span></div>
-                <div class="stat-row"><span class="stat-name">Win Rate</span><span id="winRate" class="stat-value-sm" style="color:var(--accent-blue)">68.4%</span></div>
-                <div class="stat-row"><span class="stat-name">Profit Factor</span><span id="profitFactor" class="stat-value-sm" style="color:var(--accent-green)">2.14</span></div>
-                <div class="stat-row"><span class="stat-name">Max Daily Drawdown</span><span id="maxDrawdown" class="stat-value-sm" style="color:var(--accent-red)">1.24%</span></div>
-                <div class="stat-row"><span class="stat-name">Average R:R</span><span id="avgRR" class="stat-value-sm">1 : 2.5</span></div>
-                <div class="stat-row"><span class="stat-name">Total Trades (24h)</span><span id="totalTrades" class="stat-value-sm">12</span></div>
-                <div class="stat-row" style="border:none;"><span class="stat-name">Recovery Factor</span><span id="recoveryFactor" class="stat-value-sm">4.8</span></div>
+                <div class="stat-row"><span class="stat-name">Total Profit</span><span id="totalProfit" class="stat-value-sm">—</span></div>
+                <div class="stat-row"><span class="stat-name">Win Rate</span><span id="winRate" class="stat-value-sm">—</span></div>
+                <div class="stat-row"><span class="stat-name">Profit Factor</span><span id="profitFactor" class="stat-value-sm">—</span></div>
+                <div class="stat-row"><span class="stat-name">Max Daily Drawdown</span><span id="maxDrawdown" class="stat-value-sm">—</span></div>
+                <div class="stat-row"><span class="stat-name">Average R:R</span><span id="avgRR" class="stat-value-sm">—</span></div>
+                <div class="stat-row"><span class="stat-name">Total Trades (24h)</span><span id="totalTrades" class="stat-value-sm">0</span></div>
+                <div class="stat-row" style="border:none;"><span class="stat-name">Recovery Factor</span><span id="recoveryFactor" class="stat-value-sm">—</span></div>
             </div>
         </div>
     </div>
 
     <div id="logs-page" class="page">
         <div class="card"><div class="card-label">Railway Stream (Real-Time Logic)</div><div class="console" id="logConsole">
-            <div class="log-entry"><span style="color:#555">19:30:01</span> [SYS] MetaApi Link Established.</div>
-            <div class="log-entry"><span style="color:#555">19:35:12</span> [SIGNAL] SELL XAUUSD @ 2345.00</div>
-            <div class="log-entry"><span style="color:#555">19:35:13</span> [ENGINE] <span style="color:var(--accent-red)">BLOCKED:</span> Cooldown Active (15m remaining).</div>
+            <div class="log-entry"><span style="color:#555">⎯</span> Fetching signals...</div>
         </div></div>
     </div>
 
     <script>
         // ============================================================
-        // QUANTUM GOLD MASTER TERMINAL - LIVE API INTEGRATION
-        // Fetches real data from /api/* endpoints every 10 seconds
-        // HTML/CSS untouched, only dynamic data replacement
+        // QUANTUM GOLD - FULLY DYNAMIC FRONTEND
+        // All data from API endpoints, no hardcoded demo values
         // ============================================================
 
         let lastSuccessfulFetch = Date.now();
         let refreshInterval = null;
+        let activeTimeframe = '15m';
 
         async function fetchJSON(url, fallback = null) {
             try {
@@ -237,7 +228,6 @@
             return `$${parseFloat(value).toFixed(2)}`;
         }
 
-        // Map bias text to needle angle (range -65 to +65 degrees)
         function getNeedleAngle(bias) {
             const biasUpper = (bias || '').toUpperCase();
             if (biasUpper.includes('STRONG SELL')) return -65;
@@ -248,115 +238,96 @@
             return 0;
         }
 
-        // Update the Elite 11 Intelligence card with live data from /api/market
+        // Update indicator dots based on API response
+        function updateIndicatorDots(states) {
+            if (!states) return;
+            const mapping = {
+                'ema': 'ema',
+                'macd': 'macd',
+                'adx_power': 'adx_power',
+                'hard_adx': 'hard_adx',
+                'vol_stat': 'vol_stat',
+                'trend_power': 'trend_power',
+                'vwap': 'vwap',
+                'trend': 'trend'
+            };
+            for (const [key, indicatorId] of Object.entries(mapping)) {
+                const state = states[key];
+                const element = document.querySelector(`.logic-item[data-indicator="${indicatorId}"] .dot`);
+                if (element && state) {
+                    element.className = 'dot';
+                    if (state === 'bull' || state === 'green' || state === 'buy') {
+                        element.classList.add('green-glow');
+                    } else if (state === 'bear' || state === 'red' || state === 'sell') {
+                        element.classList.add('red-glow');
+                    } else {
+                        element.classList.add('gray-dot');
+                    }
+                }
+            }
+        }
+
         function updateMarketIntelligence(data) {
             if (!data) return;
-            // Bull/Bear percentages
-            const bullPct = data.bull_pct || 0;
-            const bearPct = data.bear_pct || 0;
             const bullEl = document.getElementById('bullPercent');
             const bearEl = document.getElementById('bearPercent');
-            if (bullEl) bullEl.innerText = `${bullPct}%`;
-            if (bearEl) bearEl.innerText = `${bearPct}%`;
+            if (bullEl) bullEl.innerText = `${data.bull_pct || 0}%`;
+            if (bearEl) bearEl.innerText = `${data.bear_pct || 0}%`;
             
-            // Bias text and color
             const bias = data.bias || 'NEUTRAL';
             const biasTextEl = document.getElementById('biasText');
             if (biasTextEl) {
                 biasTextEl.innerText = bias;
-                if (bias.toUpperCase().includes('BULL')) {
-                    biasTextEl.style.color = 'var(--accent-green)';
-                } else if (bias.toUpperCase().includes('BEAR')) {
-                    biasTextEl.style.color = 'var(--accent-red)';
-                } else {
-                    biasTextEl.style.color = 'var(--accent-blue)';
-                }
+                if (bias.toUpperCase().includes('BULL')) biasTextEl.style.color = 'var(--accent-green)';
+                else if (bias.toUpperCase().includes('BEAR')) biasTextEl.style.color = 'var(--accent-red)';
+                else biasTextEl.style.color = 'var(--accent-blue)';
             }
             
-            // Smart Filter value
             const smartFilter = data.smart_filter || 'OFF';
             const smartEl = document.getElementById('smartFilterVal');
             if (smartEl) {
                 smartEl.innerText = smartFilter;
-                if (smartFilter.toUpperCase().includes('BULL')) {
-                    smartEl.style.color = 'var(--accent-green)';
-                } else if (smartFilter.toUpperCase().includes('BEAR')) {
-                    smartEl.style.color = 'var(--accent-red)';
-                } else {
-                    smartEl.style.color = 'var(--accent-blue)';
-                }
+                if (smartFilter.toUpperCase().includes('BULL')) smartEl.style.color = 'var(--accent-green)';
+                else if (smartFilter.toUpperCase().includes('BEAR')) smartEl.style.color = 'var(--accent-red)';
+                else smartEl.style.color = 'var(--accent-blue)';
             }
             
-            // Status WAIT text
             const status = data.status || 'WAITING';
             const statusEl = document.getElementById('statusWait');
-            if (statusEl) {
-                statusEl.innerText = `STATUS: ${status}`;
-            }
+            if (statusEl) statusEl.innerText = `STATUS: ${status}`;
             
-            // Rotate the needle based on bias
             const needle = document.getElementById('needle');
-            if (needle) {
-                const angle = getNeedleAngle(bias);
-                needle.style.transform = `rotate(${angle}deg)`;
-            }
+            if (needle) needle.style.transform = `rotate(${getNeedleAngle(bias)}deg)`;
         }
 
-        // Update Performance Breakdown card with live data from /api/performance
         function updatePerformanceStats(data) {
             if (!data) return;
-            // Total Trades
             const totalTradesEl = document.getElementById('totalTrades');
             if (totalTradesEl) totalTradesEl.innerText = data.total_trades || 0;
             
-            // For the other stats, the backend currently returns zeros.
-            // We'll display '—' if zero or not provided, but if you later add real values they will show.
             const winRateEl = document.getElementById('winRate');
-            if (winRateEl) {
-                const wr = data.win_rate;
-                winRateEl.innerText = (wr && wr > 0) ? `${wr}%` : '—';
-            }
+            if (winRateEl) winRateEl.innerText = (data.win_rate && data.win_rate > 0) ? `${data.win_rate}%` : '—';
             const profitFactorEl = document.getElementById('profitFactor');
-            if (profitFactorEl) {
-                const pf = data.profit_factor;
-                profitFactorEl.innerText = (pf && pf > 0) ? pf.toFixed(2) : '—';
-            }
+            if (profitFactorEl) profitFactorEl.innerText = (data.profit_factor && data.profit_factor > 0) ? data.profit_factor.toFixed(2) : '—';
             const maxDrawdownEl = document.getElementById('maxDrawdown');
-            if (maxDrawdownEl) {
-                const dd = data.max_drawdown_percent;
-                maxDrawdownEl.innerText = (dd && dd > 0) ? `${dd}%` : '—';
-            }
+            if (maxDrawdownEl) maxDrawdownEl.innerText = (data.max_drawdown_percent && data.max_drawdown_percent > 0) ? `${data.max_drawdown_percent}%` : '—';
             const avgRREl = document.getElementById('avgRR');
-            if (avgRREl) {
-                const rr = data.avg_rr;
-                avgRREl.innerText = (rr && rr > 0) ? `1 : ${rr.toFixed(1)}` : '—';
-            }
+            if (avgRREl) avgRREl.innerText = (data.avg_rr && data.avg_rr > 0) ? `1 : ${data.avg_rr.toFixed(1)}` : '—';
             const recoveryEl = document.getElementById('recoveryFactor');
-            if (recoveryEl) {
-                const rf = data.recovery_factor;
-                recoveryEl.innerText = (rf && rf > 0) ? rf.toFixed(2) : '—';
-            }
-            // Total Profit – not available in /api/performance, we keep the daily P&L from account but that's not total.
-            // We'll set to "—" until backend provides it.
+            if (recoveryEl) recoveryEl.innerText = (data.recovery_factor && data.recovery_factor > 0) ? data.recovery_factor.toFixed(2) : '—';
             const totalProfitEl = document.getElementById('totalProfit');
             if (totalProfitEl) totalProfitEl.innerText = '—';
         }
 
-        // Draw equity sparkline from /api/equity_history
         function updateSparkline(data) {
             const svg = document.querySelector('.sparkline');
             if (!svg || !data || data.length < 2) return;
-
             const balances = data.map(d => d.balance);
             const min = Math.min(...balances);
             const max = Math.max(...balances);
             const range = max - min || 1;
-
-            const width = 400;
-            const height = 100;
-            const padding = 5;
+            const width = 400, height = 100, padding = 5;
             const xStep = (width - 2 * padding) / (balances.length - 1);
-
             let path = `M${padding},${height - padding - ((balances[0] - min) / range) * (height - 2 * padding)}`;
             for (let i = 1; i < balances.length; i++) {
                 const x = padding + i * xStep;
@@ -366,16 +337,12 @@
             svg.setAttribute('d', path);
         }
 
-        // Update trailing status line from /api/manager
         async function updateTrailingStatus() {
             try {
-                const res = await fetch('/api/manager');
-                const data = await res.json();
+                const data = await fetchJSON('/api/manager', {});
                 const keys = Object.keys(data);
                 const trailingDiv = document.getElementById('trailing-status');
                 if (!trailingDiv) return;
-
-                // Look for the first group with trailing_active = true
                 let trailingGroup = null;
                 for (const key of keys) {
                     if (data[key].trailing_active) {
@@ -383,7 +350,6 @@
                         break;
                     }
                 }
-
                 if (trailingGroup) {
                     trailingDiv.innerHTML = `⚙️ <b>Trailing Active:</b> Group ${trailingGroup.key} — SL is being trailed`;
                     trailingDiv.style.color = 'var(--accent-green)';
@@ -397,7 +363,6 @@
         async function refreshAllData() {
             console.log('[Dashboard] Refreshing data from API...');
             
-            // Loading states for dynamic sections
             const balanceEl = document.getElementById('balance');
             const pnlDiv = document.getElementById('dailyPnl');
             const spreadEl = document.getElementById('spreadDisplay');
@@ -407,30 +372,30 @@
             if (balanceEl) balanceEl.innerHTML = '<span style="opacity:0.6;">$---</span>';
             if (pnlDiv) pnlDiv.innerHTML = 'Loading P&L...';
             if (spreadEl) spreadEl.innerHTML = 'Spread: --';
-            if (positionsTbody) positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Loading positions...<tr></table>';
+            if (positionsTbody) positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Loading positions...</td></tr>';
             if (logConsole) logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⎯</span> Fetching signals...</div>';
             
-            // Fetch all endpoints including new ones
-            const [statusData, accountData, positionsData, spreadData, signalsData, marketData, perfData, equityHistoryData] = await Promise.all([
+            const marketUrl = `/api/market?tf=${activeTimeframe}`;
+            const [statusData, accountData, positionsData, spreadData, signalsData, marketData, perfData, equityHistoryData, indicatorData] = await Promise.all([
                 fetchJSON('/api/status'),
                 fetchJSON('/api/account'),
                 fetchJSON('/api/positions', []),
                 fetchJSON('/api/spread'),
                 fetchJSON('/api/signals', []),
-                fetchJSON('/api/market'),
+                fetchJSON(marketUrl),
                 fetchJSON('/api/performance'),
-                fetchJSON('/api/equity_history', [])
+                fetchJSON('/api/equity_history', []),
+                fetchJSON('/api/indicators', {})
             ]);
             
             lastSuccessfulFetch = Date.now();
             
-            // 1. Status & Clock
+            // Status & Clock
             const isOnline = statusData?.online === true;
             const timeUtc = statusData?.time_utc || null;
             const statusPulse = document.getElementById('statusPulse');
             const statusText = document.getElementById('statusText');
             const clockEl = document.getElementById('clock');
-            
             if (statusPulse) {
                 if (isOnline) {
                     statusPulse.classList.remove('pulse-stale');
@@ -449,91 +414,64 @@
             if (clockEl && timeUtc) {
                 const timePart = timeUtc.includes(' ') ? timeUtc.split(' ')[1] : timeUtc;
                 clockEl.innerText = `${timePart} UTC`;
-            } else if (clockEl) {
-                clockEl.innerText = '--:--:-- UTC';
-            }
+            } else if (clockEl) clockEl.innerText = '--:--:-- UTC';
             
-            // 2. Balance & Daily P&L
+            // Balance & P&L
             if (accountData) {
-                const balance = accountData.balance;
-                const dailyPnLDollar = accountData.daily_pnl_dollar;
-                const dailyPnLPercent = accountData.daily_pnl_percent;
-                if (balanceEl && balance !== undefined) balanceEl.innerText = formatUSD(balance);
+                if (balanceEl && accountData.balance !== undefined) balanceEl.innerText = formatUSD(accountData.balance);
                 if (pnlDiv) {
-                    const isPositive = dailyPnLDollar >= 0;
+                    const isPositive = accountData.daily_pnl_dollar >= 0;
                     const sign = isPositive ? '+' : '';
                     const color = isPositive ? 'var(--accent-green)' : 'var(--accent-red)';
                     pnlDiv.style.color = color;
-                    pnlDiv.innerHTML = `${sign}${formatUSD(dailyPnLDollar)} Today (${sign}${Math.abs(dailyPnLPercent).toFixed(2)}%)`;
+                    pnlDiv.innerHTML = `${sign}${formatUSD(accountData.daily_pnl_dollar)} Today (${sign}${Math.abs(accountData.daily_pnl_percent).toFixed(2)}%)`;
                 }
-            } else {
-                if (pnlDiv) pnlDiv.innerHTML = 'P&L unavailable';
-            }
+            } else if (pnlDiv) pnlDiv.innerHTML = 'P&L unavailable';
             
-            // 3. Spread
+            // Spread
             if (spreadEl && spreadData) {
                 const spreadPips = spreadData.spread_pips;
                 const maxSpread = spreadData.max_spread_pips;
                 const isSafe = spreadData.is_safe;
                 spreadEl.innerText = `Spread: ${spreadPips.toFixed(1)}`;
-                if (!isSafe || (maxSpread && spreadPips > maxSpread)) {
-                    spreadEl.classList.add('spread-high');
-                } else {
-                    spreadEl.classList.remove('spread-high');
-                }
+                if (!isSafe || (maxSpread && spreadPips > maxSpread)) spreadEl.classList.add('spread-high');
+                else spreadEl.classList.remove('spread-high');
             }
             
-            // 4. Positions Table
+            // Positions Table
             if (positionsTbody && Array.isArray(positionsData)) {
                 if (positionsData.length === 0) {
                     positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-dim);">No active positions</td></tr>';
                 } else {
-                    const rowsHtml = positionsData.map(pos => {
-                        const ticket = pos.positionId;
-                        const type = pos.type === 'BUY' ? 'BUY' : 'SELL';
-                        const volume = pos.volume.toFixed(2);
-                        const entry = pos.open_price.toFixed(2);
-                        const current = pos.current_price.toFixed(2);
-                        const sl = pos.sl !== 0 ? pos.sl.toFixed(2) : '—';
-                        const tp = pos.tp !== 0 ? pos.tp.toFixed(2) : '—';
-                        const profit = pos.profit_dollar;
-                        const profitColor = profit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
-                        const profitSign = profit >= 0 ? '+' : '';
-                        return `
-                            <tr>
-                                <td>#${ticket}<br><b style="color:var(--accent-gold)">${type} ${volume}</b></td>
-                                <td><span class="price-tag">${entry}</span><br><small style="color:var(--text-dim)">${current}</small></td>
-                                <td><span style="color:var(--accent-red)">${sl}</span> / <span style="color:var(--accent-green)">${tp}</span></td>
-                                <td style="color:${profitColor}; font-weight:bold;">${profitSign}${profit.toFixed(2)}</td>
-                            </tr>
-                        `;
-                    }).join('');
+                    const rowsHtml = positionsData.map(pos => `
+                        <tr>
+                            <td>#${pos.positionId}<br><b style="color:var(--accent-gold)">${pos.type === 'BUY' ? 'BUY' : 'SELL'} ${pos.volume.toFixed(2)}</b></td>
+                            <td><span class="price-tag">${pos.open_price.toFixed(2)}</span><br><small style="color:var(--text-dim)">${pos.current_price.toFixed(2)}</small></td>
+                            <td><span style="color:var(--accent-red)">${pos.sl !== 0 ? pos.sl.toFixed(2) : '—'}</span> / <span style="color:var(--accent-green)">${pos.tp !== 0 ? pos.tp.toFixed(2) : '—'}</span></td>
+                            <td style="color:${pos.profit_dollar >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}; font-weight:bold;">${pos.profit_dollar >= 0 ? '+' : ''}${pos.profit_dollar.toFixed(2)}</td>
+                        </tr>
+                    `).join('');
                     positionsTbody.innerHTML = rowsHtml;
                 }
             } else if (positionsTbody) {
-                positionsTbody.innerHTML = '</table><td colspan="4" style="text-align:center; color:red;">Error loading positions</td></tr>';
+                positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:red;">Error loading positions</td></tr>';
             }
             
-            // 5. Logs Console
+            // Logs Console
             if (logConsole && Array.isArray(signalsData)) {
                 if (signalsData.length === 0) {
                     logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⎯</span> No signals recorded</div>';
                 } else {
                     const logsHtml = signalsData.map(sig => {
-                        const time = sig.time || '--:--:--';
-                        const symbol = sig.symbol || 'XAUUSD';
-                        const action = sig.action || '—';
-                        const entry = sig.entry !== undefined ? ` @ ${sig.entry.toFixed(2)}` : '';
                         const status = sig.status || 'PENDING';
-                        const reason = sig.reason ? ` (${sig.reason})` : '';
                         let statusColor = 'var(--terminal-green)';
                         if (status === 'BLOCKED' || status === 'REJECTED') statusColor = 'var(--accent-red)';
                         if (status === 'EXECUTED') statusColor = '#00ffa3';
                         return `<div class="log-entry">
-                                    <span style="color:#555;">${time}</span> 
-                                    [${action}] ${symbol}${entry} 
-                                    - <span style="color:${statusColor};">${status}</span>${reason}
-                                </div>`;
+                            <span style="color:#555;">${sig.time || '--:--:--'}</span> 
+                            [${sig.action || '—'}] ${sig.symbol || 'XAUUSD'}${sig.entry ? ` @ ${sig.entry.toFixed(2)}` : ''} 
+                            - <span style="color:${statusColor};">${status}</span>${sig.reason ? ` (${sig.reason})` : ''}
+                        </div>`;
                     }).join('');
                     logConsole.innerHTML = logsHtml;
                     logConsole.scrollTop = logConsole.scrollHeight;
@@ -542,19 +480,12 @@
                 logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⚠️</span> Failed to fetch signals</div>';
             }
             
-            // 6. Elite 11 Intelligence
             updateMarketIntelligence(marketData);
-            
-            // 7. Performance Breakdown
             updatePerformanceStats(perfData);
-            
-            // 8. Equity Sparkline
             updateSparkline(equityHistoryData);
-            
-            // 9. Trailing Status
+            updateIndicatorDots(indicatorData);
             await updateTrailingStatus();
             
-            // Stale data check
             setTimeout(() => {
                 if (Date.now() - lastSuccessfulFetch > 12000) {
                     const sp = document.getElementById('statusPulse');
@@ -578,28 +509,38 @@
             refreshInterval = setInterval(refreshAllData, 10000);
         }
 
+        function initTimeframeButtons() {
+            const buttons = document.querySelectorAll('.tf-btn');
+            buttons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    buttons.forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    activeTimeframe = btn.getAttribute('data-timeframe');
+                    refreshAllData();
+                });
+            });
+        }
+
         window.switchTab = function(tabId) {
-            document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-            const activePage = document.getElementById(tabId);
-            if (activePage) activePage.classList.add('active');
-            const clickedTab = Array.from(document.querySelectorAll('.tab')).find(tab => 
-                tab.innerText.toLowerCase().includes(tabId.includes('main') ? 'monitor' : (tabId.includes('analytics') ? 'analytics' : 'logs'))
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            const clickedTab = Array.from(document.querySelectorAll('.tab')).find(t => 
+                t.innerText.toLowerCase().includes(tabId.includes('main') ? 'monitor' : (tabId.includes('analytics') ? 'analytics' : 'logs'))
             );
             if (clickedTab) clickedTab.classList.add('active');
             else {
                 document.querySelectorAll('.tab').forEach(tab => {
-                    if (tab.getAttribute('onclick') === `switchTab('${tabId}')`) {
-                        tab.classList.add('active');
-                    }
+                    if (tab.getAttribute('onclick') === `switchTab('${tabId}')`) tab.classList.add('active');
                 });
             }
         };
 
         document.addEventListener('DOMContentLoaded', () => {
             for (let i = 0; i < 9999; i++) clearInterval(i);
+            initTimeframeButtons();
             startAutoRefresh();
-            console.log('[Quantum Gold] Live API integration active — fetching every 10s');
+            console.log('[Quantum Gold] Fully dynamic frontend active — fetching all data every 10s');
         });
 
         window.forceRefresh = refreshAllData;
