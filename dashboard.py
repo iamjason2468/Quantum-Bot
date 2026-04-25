@@ -124,6 +124,69 @@ def api_manager():
     return jsonify(groups)
 
 
+# ------------------------------------------------------------------
+# NEW: Market Intelligence (for Elite 11 card)
+# ------------------------------------------------------------------
+@dashboard_bp.route('/api/market')
+def api_market():
+    with _state_lock:
+        if not recent_signals:
+            return jsonify({
+                "bull_pct": 0,
+                "bear_pct": 0,
+                "adx": 0,
+                "bias": "NO SIGNALS",
+                "smart_filter": "OFF",
+                "trend": "WEAK",
+                "status": "WAITING"
+            })
+        last = recent_signals[-1]
+        return jsonify({
+            "bull_pct": float(last.get("bull_pct", 0)),
+            "bear_pct": float(last.get("bear_pct", 0)),
+            "adx": float(last.get("adx", 0)),
+            "bias": last.get("bias_text", "NEUTRAL"),
+            "smart_filter": last.get("smart_filter", "OFF"),
+            "trend": last.get("trend_strength", "WEAK"),
+            "status": last.get("status", "?")
+        })
+
+
+# ------------------------------------------------------------------
+# NEW: Performance Stats (for Performance Breakdown)
+# ------------------------------------------------------------------
+@dashboard_bp.route('/api/performance')
+def api_performance():
+    with _state_lock:
+        total = len(recent_signals)
+        if total == 0:
+            return jsonify({
+                "total_trades": 0,
+                "executed": 0,
+                "blocked": 0,
+                "error": 0,
+                "win_rate": 0,
+                "profit_factor": 0,
+                "max_drawdown_percent": 0,
+                "avg_rr": 0,
+                "recovery_factor": 0
+            })
+        executed = sum(1 for s in recent_signals if s.get("status") == "EXECUTED")
+        blocked = sum(1 for s in recent_signals if s.get("status", "").startswith("BLOCKED"))
+        errors = total - executed - blocked
+        return jsonify({
+            "total_trades": total,
+            "executed": executed,
+            "blocked": blocked,
+            "error": errors,
+            "win_rate": 0,
+            "profit_factor": 0,
+            "max_drawdown_percent": 0,
+            "avg_rr": 0,
+            "recovery_factor": 0
+        })
+
+
 @dashboard_bp.route('/dashboard')
 def dashboard_page():
     return render_template('dashboard.html')
