@@ -639,7 +639,8 @@ init_dashboard(
     state_lock, run_async, fetch_account_balance, get_current_spread,
     get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS,
     daily_start_balance, cooldown_until, recent_signals,
-    post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
+    post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global,
+    get_connection
 )
 
 # ------------------------------------------------------------------
