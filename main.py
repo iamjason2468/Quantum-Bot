@@ -173,7 +173,7 @@ def check_daily_loss_limit(current_balance):
         return True
 
 # ------------------------------------------------------------------
-# METAAPI INITIALIZATION
+# METAAPI INITIALIZATION (FIXED: removed region parameter)
 # ------------------------------------------------------------------
 _metaapi_instance = None
 _metaapi_lock = threading.Lock()
@@ -183,8 +183,8 @@ def get_metaapi():
     if _metaapi_instance is None:
         with _metaapi_lock:
             if _metaapi_instance is None:
-                _metaapi_instance = MetaApi(TOKEN, {'region': 'london'})
-                logger.info("🔧 MetaApi initialized with region: london")
+                _metaapi_instance = MetaApi(TOKEN)  # ← No region parameter!
+                logger.info("🔧 MetaApi initialized (auto region detection)")
     return _metaapi_instance
 
 # ------------------------------------------------------------------
@@ -674,7 +674,7 @@ init_dashboard(
     daily_start_balance, cooldown_until, recent_signals,
     post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global,
     get_connection, current_market_data, equity_history,
-    closed_trade_pnls            # ← new parameter
+    closed_trade_pnls
 )
 
 # ------------------------------------------------------------------
