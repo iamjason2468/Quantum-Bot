@@ -51,23 +51,6 @@
         .wide-card { grid-column: span 2; }
         .card-label { color: var(--text-dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
 
-        .tf-header { display: flex; justify-content: center; gap: 6px; margin-bottom: 20px; }
-        .tf-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: rgba(255,255,255,0.03); color: var(--text-dim); font-size: 0.6rem; font-weight: 700; cursor: pointer; }
-        .tf-btn.active { border-color: var(--accent-gold); color: var(--accent-gold); background: rgba(255,215,0,0.05); }
-        
-        .gauge-box { position: relative; width: 180px; height: 95px; margin: 0 auto 20px auto; }
-        .gauge-arc { position: absolute; width: 180px; height: 180px; border-radius: 50%; border: 7px solid #1a1a1f; clip-path: inset(0 0 50% 0); background: conic-gradient(from 270deg at 50% 50%, #ff4d4d 0%, #ff9f00 25%, #333 50%, #00d1ff 75%, #00ffa3 100%); opacity: 0.15; }
-        .needle-pivot { position: absolute; bottom: 0; left: 50%; width: 2px; height: 75px; background: var(--accent-red); transform-origin: bottom center; transform: rotate(-65deg); transition: 1s cubic-bezier(0.17, 0.67, 0.83, 0.67); box-shadow: 0 0 10px var(--accent-red); z-index: 5; }
-        .labels-container { position: absolute; width: 120%; left: -10%; bottom: -15px; display: flex; justify-content: space-between; font-size: 0.45rem; font-weight: 800; color: var(--text-dim); text-transform: uppercase; }
-
-        .logic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 15px; }
-        .score-row { grid-column: span 2; display: flex; gap: 6px; margin-bottom: 4px; }
-        .score-item { flex: 1; background: rgba(255,255,255,0.02); border: 1px solid var(--border); padding: 8px; border-radius: 10px; text-align: center; }
-        .logic-item { background: rgba(255,255,255,0.02); border: 1px solid var(--border); padding: 8px 10px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; }
-        .logic-label { font-size: 0.6rem; color: var(--text-dim); font-weight: 600; text-transform: uppercase; }
-        .logic-val { font-size: 0.6rem; font-weight: 800; }
-        .dot { width: 5px; height: 5px; border-radius: 50%; }
-
         .spread-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.05); color: var(--text-dim); border: 1px solid var(--border); }
         .spread-high { color: var(--accent-red) !important; border-color: var(--accent-red) !important; background: rgba(255, 77, 77, 0.1) !important; }
         .curve-container { margin: 10px 0; background: rgba(0, 0, 0, 0.4); border-radius: 12px; padding: 15px; }
@@ -77,10 +60,6 @@
         .stat-name { color: var(--text-dim); font-size: 0.85rem; }
         .stat-value-sm { font-weight: 700; font-size: 0.9rem; }
         
-        .red-glow { background: var(--accent-red); box-shadow: 0 0 6px var(--accent-red); }
-        .green-glow { background: var(--accent-green); box-shadow: 0 0 6px var(--accent-green); }
-        .gray-dot { background: #333; }
-
         table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
         th { text-align: left; color: var(--text-dim); padding-bottom: 10px; border-bottom: 1px solid var(--border); }
         td { padding: 12px 0; border-bottom: 1px solid #16161a; }
@@ -120,39 +99,6 @@
                 </div>
                 <div style="font-size: 2rem; font-weight: 800;" id="balance">$1,240.55</div>
                 <div id="dailyPnl" style="color:var(--accent-green); font-size: 0.85rem; font-weight: 700;">+$45.20 Today</div>
-            </div>
-
-            <div class="card">
-                <div class="card-label" style="text-align: center;">Elite 11 Intelligence</div>
-                <div class="tf-header">
-                    <div class="tf-btn" data-timeframe="5m">5m</div>
-                    <div class="tf-btn active" data-timeframe="15m">15m</div>
-                    <div class="tf-btn" data-timeframe="1H">1H</div>
-                    <div class="tf-btn" data-timeframe="1D">1D</div>
-                </div>
-                <div class="gauge-box">
-                    <div class="gauge-arc"></div>
-                    <div id="needle" class="needle-pivot"></div>
-                    <div class="labels-container"><span>Strong Sell</span><span>Neutral</span><span>Strong Buy</span></div>
-                </div>
-                <div id="biasText" style="text-align: center; font-weight: 900; color: var(--accent-red); font-size: 1.1rem; margin-bottom: 10px;">STRONG BEAR</div>
-                
-                <div class="logic-grid">
-                    <div class="score-row">
-                        <div class="score-item"><div class="logic-label" style="color:var(--accent-green)">Bull</div><div id="bullPercent" class="logic-val">17%</div></div>
-                        <div class="score-item"><div class="logic-label" style="color:var(--accent-red)">Bear</div><div id="bearPercent" class="logic-val">67%</div></div>
-                    </div>
-                    <div class="logic-item" data-indicator="ema"><span class="logic-label">EMA</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item" data-indicator="macd"><span class="logic-label">MACD</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item" data-indicator="adx_power"><span class="logic-label">ADX Pwr</span><div class="dot green-glow"></div></div>
-                    <div class="logic-item" data-indicator="hard_adx"><span class="logic-label">Hard ADX</span><div class="dot gray-dot"></div></div>
-                    <div class="logic-item" data-indicator="vol_stat"><span class="logic-label">Vol Stat</span><div class="dot green-glow"></div></div>
-                    <div class="logic-item" data-indicator="trend_power"><span class="logic-label">Trend Pwr</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item" data-indicator="vwap"><span class="logic-label">VWAP</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item" data-indicator="trend"><span class="logic-label">Trend</span><div class="dot red-glow"></div></div>
-                    <div class="logic-item" style="grid-column: span 2;"><span class="logic-label">Smart Filter</span><span id="smartFilterVal" class="logic-val" style="color:var(--accent-red)">BEAR BIAS</span></div>
-                </div>
-                <div id="statusWait" style="margin-top: 12px; padding: 10px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); text-align: center; font-size: 0.7rem; font-weight: 900;">STATUS: WAIT</div>
             </div>
 
             <div class="card wide-card">
@@ -201,14 +147,8 @@
     </div>
 
     <script>
-        // ============================================================
-        // QUANTUM GOLD - FULLY DYNAMIC FRONTEND
-        // All data from API endpoints, no hardcoded demo values
-        // ============================================================
-
         let lastSuccessfulFetch = Date.now();
         let refreshInterval = null;
-        let activeTimeframe = '15m';
 
         async function fetchJSON(url, fallback = null) {
             try {
@@ -226,78 +166,6 @@
 
         function formatUSD(value) {
             return `$${parseFloat(value).toFixed(2)}`;
-        }
-
-        function getNeedleAngle(bias) {
-            const biasUpper = (bias || '').toUpperCase();
-            if (biasUpper.includes('STRONG SELL')) return -65;
-            if (biasUpper.includes('SELL')) return -30;
-            if (biasUpper === 'NEUTRAL') return 0;
-            if (biasUpper.includes('BUY')) return 30;
-            if (biasUpper.includes('STRONG BUY')) return 65;
-            return 0;
-        }
-
-        // Update indicator dots based on API response
-        function updateIndicatorDots(states) {
-            if (!states) return;
-            const mapping = {
-                'ema': 'ema',
-                'macd': 'macd',
-                'adx_power': 'adx_power',
-                'hard_adx': 'hard_adx',
-                'vol_stat': 'vol_stat',
-                'trend_power': 'trend_power',
-                'vwap': 'vwap',
-                'trend': 'trend'
-            };
-            for (const [key, indicatorId] of Object.entries(mapping)) {
-                const state = states[key];
-                const element = document.querySelector(`.logic-item[data-indicator="${indicatorId}"] .dot`);
-                if (element && state) {
-                    element.className = 'dot';
-                    if (state === 'bull' || state === 'green' || state === 'buy') {
-                        element.classList.add('green-glow');
-                    } else if (state === 'bear' || state === 'red' || state === 'sell') {
-                        element.classList.add('red-glow');
-                    } else {
-                        element.classList.add('gray-dot');
-                    }
-                }
-            }
-        }
-
-        function updateMarketIntelligence(data) {
-            if (!data) return;
-            const bullEl = document.getElementById('bullPercent');
-            const bearEl = document.getElementById('bearPercent');
-            if (bullEl) bullEl.innerText = `${data.bull_pct || 0}%`;
-            if (bearEl) bearEl.innerText = `${data.bear_pct || 0}%`;
-            
-            const bias = data.bias || 'NEUTRAL';
-            const biasTextEl = document.getElementById('biasText');
-            if (biasTextEl) {
-                biasTextEl.innerText = bias;
-                if (bias.toUpperCase().includes('BULL')) biasTextEl.style.color = 'var(--accent-green)';
-                else if (bias.toUpperCase().includes('BEAR')) biasTextEl.style.color = 'var(--accent-red)';
-                else biasTextEl.style.color = 'var(--accent-blue)';
-            }
-            
-            const smartFilter = data.smart_filter || 'OFF';
-            const smartEl = document.getElementById('smartFilterVal');
-            if (smartEl) {
-                smartEl.innerText = smartFilter;
-                if (smartFilter.toUpperCase().includes('BULL')) smartEl.style.color = 'var(--accent-green)';
-                else if (smartFilter.toUpperCase().includes('BEAR')) smartEl.style.color = 'var(--accent-red)';
-                else smartEl.style.color = 'var(--accent-blue)';
-            }
-            
-            const status = data.status || 'WAITING';
-            const statusEl = document.getElementById('statusWait');
-            if (statusEl) statusEl.innerText = `STATUS: ${status}`;
-            
-            const needle = document.getElementById('needle');
-            if (needle) needle.style.transform = `rotate(${getNeedleAngle(bias)}deg)`;
         }
 
         function updatePerformanceStats(data) {
@@ -375,17 +243,14 @@
             if (positionsTbody) positionsTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Loading positions...</td></tr>';
             if (logConsole) logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⎯</span> Fetching signals...</div>';
             
-            const marketUrl = `/api/market?tf=${activeTimeframe}`;
-            const [statusData, accountData, positionsData, spreadData, signalsData, marketData, perfData, equityHistoryData, indicatorData] = await Promise.all([
+            const [statusData, accountData, positionsData, spreadData, signalsData, perfData, equityHistoryData] = await Promise.all([
                 fetchJSON('/api/status'),
                 fetchJSON('/api/account'),
                 fetchJSON('/api/positions', []),
                 fetchJSON('/api/spread'),
                 fetchJSON('/api/signals', []),
-                fetchJSON(marketUrl),
                 fetchJSON('/api/performance'),
-                fetchJSON('/api/equity_history', []),
-                fetchJSON('/api/indicators', {})
+                fetchJSON('/api/equity_history', [])
             ]);
             
             lastSuccessfulFetch = Date.now();
@@ -480,10 +345,8 @@
                 logConsole.innerHTML = '<div class="log-entry"><span style="color:#555;">⚠️</span> Failed to fetch signals</div>';
             }
             
-            updateMarketIntelligence(marketData);
             updatePerformanceStats(perfData);
             updateSparkline(equityHistoryData);
-            updateIndicatorDots(indicatorData);
             await updateTrailingStatus();
             
             setTimeout(() => {
@@ -509,18 +372,6 @@
             refreshInterval = setInterval(refreshAllData, 10000);
         }
 
-        function initTimeframeButtons() {
-            const buttons = document.querySelectorAll('.tf-btn');
-            buttons.forEach(btn => {
-                btn.addEventListener('click', () => {
-                    buttons.forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    activeTimeframe = btn.getAttribute('data-timeframe');
-                    refreshAllData();
-                });
-            });
-        }
-
         window.switchTab = function(tabId) {
             document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -538,7 +389,6 @@
 
         document.addEventListener('DOMContentLoaded', () => {
             for (let i = 0; i < 9999; i++) clearInterval(i);
-            initTimeframeButtons();
             startAutoRefresh();
             console.log('[Quantum Gold] Fully dynamic frontend active — fetching all data every 10s');
         });
