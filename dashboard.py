@@ -146,26 +146,26 @@ def api_market():
 
 @dashboard_bp.route('/api/indicators')
 def api_indicators():
-    # Map the market data to indicator states
+    # If no data yet, return neutral defaults
     if _market_data is None:
         return jsonify({
             "ema": "neutral", "macd": "neutral", "adx_power": "neutral",
             "hard_adx": "off", "vol_stat": "neutral", "trend_power": "neutral",
             "vwap": "neutral", "trend": "neutral"
         })
-    bull = _market_data.get("bull_pct", 0)
-    bias = _market_data.get("bias", "NEUTRAL")
-    trend = _market_data.get("trend", "WEAK")
+    
+    # ⭐ NOW PULLING EXACT VALUES FROM TRADINGVIEW (via main.py → _market_data)
     adx = _market_data.get("adx", 0)
+    
     return jsonify({
-        "ema": "bull" if bull > 50 else "bear",
-        "macd": "bull" if bull > 50 else "bear",
+        "ema": _market_data.get("ema", "neutral"),           # "bull" or "bear" from Pine Script
+        "macd": _market_data.get("macd", "neutral"),         # "bull" or "bear" from Pine Script
         "adx_power": "strong" if adx > 25 else "moderate",
-        "hard_adx": "off",
-        "vol_stat": "high" if bull > 50 else "low",
-        "trend_power": trend.lower(),
-        "vwap": "bull" if bull > 50 else "bear",
-        "trend": "bull" if "BULL" in bias.upper() else "bear"
+        "hard_adx": _market_data.get("hard_adx", "off"),     # "pass", "block", or "off" from Pine Script
+        "vol_stat": _market_data.get("vol_stat", "neutral"), # "high" or "low" from Pine Script
+        "trend_power": _market_data.get("trend", "weak").lower(),  # "strong", "moderate", "weak" from Pine Script
+        "vwap": _market_data.get("vwap", "neutral"),         # "bull" or "bear" from Pine Script
+        "trend": "bull" if "BULL" in _market_data.get("bias", "NEUTRAL").upper() else "bear"
     })
 
 
