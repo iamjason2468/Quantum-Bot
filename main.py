@@ -697,16 +697,37 @@ def root():
 def webhook():
     global current_market_data
     
+    # ==================== ENHANCED LOGGING ====================
+    logger.info("=" * 60)
+    logger.info("🔥 WEBHOOK RECEIVED - RAW DUMP")
+    logger.info(f"Method: {request.method}")
+    logger.info(f"Path: {request.path}")
+    logger.info(f"Content-Type: {request.content_type}")
+    logger.info(f"Content-Length: {request.content_length}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
+    # Get raw body as text
+    raw_body = request.get_data(as_text=True)
+    logger.info(f"Raw Body (first 1000 chars): {raw_body[:1000]}")
+    logger.info("=" * 60)
+    
     try:
-        # Try to parse JSON - accept both keys
-        raw_data = request.get_data(as_text=True)
-        data = json.loads(raw_data) if raw_data else {}
+        # Try to parse JSON from raw string
+        try:
+            data = json.loads(raw_body)
+            logger.info(f"✅ JSON parsed successfully: {json.dumps(data, indent=2)[:500]}")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON parse failed: {e} | Raw body: {raw_body[:200]}")
+            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+        except Exception as e:
+            logger.error(f"❌ Unexpected parse error: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 400
         
         if not data:
             logger.warning("📨 Received empty webhook payload")
             return jsonify({"status": "error", "message": "Empty payload"}), 400
 
-        # ⭐ IMPORTANT: Check if this is a market intelligence update (dashboard heartbeat)
+        # Check if this is a market intelligence update (dashboard heartbeat)
         if data.get("type") == "market_intel":
             # Verify passphrase for security
             if data.get('passphrase') != WEBHOOK_SECRET:
@@ -734,12 +755,12 @@ def webhook():
                        f"VWAP={current_market_data['vwap']}")
             return jsonify({"status": "dashboard_updated"}), 200
         
-        # ⭐ If not market_intel, process as trade signal
+        # If not market_intel, process as trade signal
         if data.get('passphrase') != WEBHOOK_SECRET:
             logger.warning("🔐 Unauthorized webhook attempt blocked")
             return jsonify({"status": "unauthorized"}), 401
 
-        logger.info(f"📨 Received TRADE SIGNAL: {json.dumps(data)}")
+        logger.info(f"📨 Processing TRADE SIGNAL: {json.dumps(data)}")
 
         user = data.get("user_id", "ME")
         target_id = MY_ACC_ID if user.upper() == "ME" else FRIEND_ACC_ID
@@ -829,9 +850,6 @@ def webhook():
             "result": result
         }), 200
 
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ Invalid JSON in webhook: {e}")
-        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
