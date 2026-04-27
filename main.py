@@ -90,6 +90,11 @@ current_market_data = {
     "bias": "NEUTRAL",
     "smart_filter": "OFF",
     "trend": "WEAK",
+    "ema": "neutral",
+    "macd": "neutral",
+    "vwap": "neutral",
+    "vol_stat": "low",
+    "hard_adx": "off",
     "status": "WAITING"
 }
 
@@ -690,13 +695,51 @@ def root():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    global current_market_data
+    
     try:
-        data = request.json
-        if not data or data.get('passphrase') != WEBHOOK_SECRET:
+        # Try to parse JSON - accept both keys
+        raw_data = request.get_data(as_text=True)
+        data = json.loads(raw_data) if raw_data else {}
+        
+        if not data:
+            logger.warning("📨 Received empty webhook payload")
+            return jsonify({"status": "error", "message": "Empty payload"}), 400
+
+        # ⭐ IMPORTANT: Check if this is a market intelligence update (dashboard heartbeat)
+        if data.get("type") == "market_intel":
+            # Verify passphrase for security
+            if data.get('passphrase') != WEBHOOK_SECRET:
+                logger.warning("🔐 Unauthorized market intelligence update blocked")
+                return jsonify({"status": "unauthorized"}), 401
+            
+            # Update the dashboard's market data with ALL the new fields
+            current_market_data.update({
+                "bull_pct": float(data.get("bull_pct", 0)),
+                "bear_pct": float(data.get("bear_pct", 0)),
+                "adx": float(data.get("adx", 0)),
+                "bias": data.get("bias", "NEUTRAL"),
+                "smart_filter": data.get("smart_filter", "OFF"),
+                "trend": data.get("trend", "WEAK"),
+                "ema": data.get("ema", "neutral"),
+                "macd": data.get("macd", "neutral"),
+                "vwap": data.get("vwap", "neutral"),
+                "vol_stat": data.get("vol_stat", "low"),
+                "hard_adx": data.get("hard_adx", "off"),
+                "status": "ACTIVE"
+            })
+            
+            logger.info(f"📊 Dashboard updated: Bias={current_market_data['bias']}, "
+                       f"EMA={current_market_data['ema']}, MACD={current_market_data['macd']}, "
+                       f"VWAP={current_market_data['vwap']}")
+            return jsonify({"status": "dashboard_updated"}), 200
+        
+        # ⭐ If not market_intel, process as trade signal
+        if data.get('passphrase') != WEBHOOK_SECRET:
             logger.warning("🔐 Unauthorized webhook attempt blocked")
             return jsonify({"status": "unauthorized"}), 401
 
-        logger.info(f"📨 Received signal: {data}")
+        logger.info(f"📨 Received TRADE SIGNAL: {json.dumps(data)}")
 
         user = data.get("user_id", "ME")
         target_id = MY_ACC_ID if user.upper() == "ME" else FRIEND_ACC_ID
@@ -758,7 +801,7 @@ def webhook():
         include_tp4 = 'tp4' in data and tp4 > 0
         be_buffer = float(data.get('be_buffer', 0.0))
 
-        logger.info(f"🪙 {final_symbol} | Entry: {entry}, SL: {sl}, TP1: {tp1}, TP2: {tp2}, TP3: {tp3}")
+        logger.info(f"🪙 TRADE: {final_symbol} | {action.upper()} | Entry: {entry} | SL: {sl} | TP1: {tp1} | TP2: {tp2} | TP3: {tp3}")
         if include_tp4:
             logger.info(f"🪙 TP4: {tp4}")
 
@@ -786,12 +829,15 @@ def webhook():
             "result": result
         }), 200
 
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Invalid JSON in webhook: {e}")
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ------------------------------------------------------------------
-# UPDATED /market_webhook – accepts ANY Content-Type and parses JSON
+# /market_webhook – Legacy endpoint (kept for backward compatibility)
 # ------------------------------------------------------------------
 @app.route('/market_webhook', methods=['POST'])
 def market_webhook():
@@ -807,16 +853,21 @@ def market_webhook():
         if not data:
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
-        current_market_data = {
+        current_market_data.update({
             "bull_pct": float(data.get("bull_pct", 0)),
             "bear_pct": float(data.get("bear_pct", 0)),
             "adx": float(data.get("adx", 0)),
             "bias": data.get("bias", "NEUTRAL"),
             "smart_filter": data.get("smart_filter", "OFF"),
             "trend": data.get("trend", "WEAK"),
+            "ema": data.get("ema", "neutral"),
+            "macd": data.get("macd", "neutral"),
+            "vwap": data.get("vwap", "neutral"),
+            "vol_stat": data.get("vol_stat", "low"),
+            "hard_adx": data.get("hard_adx", "off"),
             "status": data.get("status", "WAITING")
-        }
-        logger.info(f"📊 Market data updated: {current_market_data}")
+        })
+        logger.info(f"📊 Market data updated via legacy endpoint: {current_market_data}")
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logger.error(f"Market webhook error: {e}")
