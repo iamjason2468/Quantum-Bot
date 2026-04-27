@@ -913,6 +913,41 @@ def market_webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ------------------------------------------------------------------
+# DASHBOARD API ROUTES (The Bridge to HTML)
+# ------------------------------------------------------------------
+@app.route('/api/market', methods=['GET'])
+def get_market_api():
+    # This feeds the Gauge and the Bias text
+    return jsonify(current_market_data)
+
+@app.route('/api/indicators', methods=['GET'])
+def get_indicators_api():
+    # This feeds the Green/Red dots in the Logic Grid
+    return jsonify({
+        "ema": current_market_data.get("ema", "neutral"),
+        "macd": current_market_data.get("macd", "neutral"),
+        "vwap": current_market_data.get("vwap", "neutral"),
+        "vol_stat": current_market_data.get("vol_stat", "low"),
+        "trend": current_market_data.get("trend", "neutral"),
+        "adx_power": "green" if current_market_data.get("adx", 0) > 25 else "red",
+        "trend_power": "green" if current_market_data.get("trend") == "STRONG" else "red",
+        "hard_adx": current_market_data.get("hard_adx", "off")
+    })
+
+@app.route('/api/status', methods=['GET'])
+def get_status_api():
+    # This turns the red "Offline" dot into the gold "Engine Live" pulse
+    return jsonify({
+        "online": True,
+        "time_utc": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    })
+
+@app.route('/api/equity_history', methods=['GET'])
+def get_equity_history():
+    # This feeds the sparkline graph in the Analytics tab
+    return jsonify(list(equity_history))
+
+# ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
 if __name__ == "__main__":
