@@ -790,11 +790,20 @@ def webhook():
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ------------------------------------------------------------------
+# UPDATED /market_webhook – accepts ANY Content-Type and parses JSON
+# ------------------------------------------------------------------
 @app.route('/market_webhook', methods=['POST'])
 def market_webhook():
     global current_market_data
     try:
-        data = request.json
+        # Get raw data as text
+        raw_data = request.get_data(as_text=True)
+        logger.info(f"📥 Received market webhook raw: {raw_data[:200]}")  # log first 200 chars
+
+        # Try to parse JSON from the raw string (works even if Content-Type isn't application/json)
+        data = json.loads(raw_data)
+
         if not data:
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
@@ -811,7 +820,7 @@ def market_webhook():
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logger.error(f"Market webhook error: {e}")
-        return jsonify({"status": "error"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ------------------------------------------------------------------
 # MAIN
