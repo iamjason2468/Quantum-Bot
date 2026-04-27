@@ -24,7 +24,6 @@ _get_connection_raw = None
 _equity_history = None
 _closed_trade_pnls = None
 
-# Cache for computed market states per timeframe
 _market_cache = {}
 _market_cache_ttl = 60
 
@@ -33,7 +32,9 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
                    get_positions_for_api, my_acc_id, gold_suffix, max_spread_pips,
                    daily_start_bal, cooldown, recent_sigs,
                    post_tp1_active, tp1_hit_tracking, tp_removed,
-                   get_connection_raw=None, equity_history=None, closed_trade_pnls=None):
+                   get_connection_raw=None, market_data=None, equity_history=None,
+                   closed_trade_pnls=None):   # <-- Added parameter
+    """Call this from main.py to connect the dashboard to the bot's state."""
     global _state_lock, _run_async, _fetch_account_balance, _get_current_spread
     global _get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS
     global daily_start_balance, cooldown_until, recent_signals
@@ -56,7 +57,7 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
     tp_removed_global = tp_removed
     _get_connection_raw = get_connection_raw
     _equity_history = equity_history
-    _closed_trade_pnls = closed_trade_pnls
+    _closed_trade_pnls = closed_trade_pnls   # <-- Store it
 
 
 async def compute_market_state_for_tf(symbol, timeframe="5m"):
@@ -124,7 +125,7 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
     adx_val = dx
 
-    # Simplified bias scores
+    # Simplified bias scores (6 components each)
     b_score = sum([
         price > vwap,
         rsi_val > 50,
