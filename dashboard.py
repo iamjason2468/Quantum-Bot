@@ -3,7 +3,6 @@ from flask import Blueprint, jsonify, render_template, request
 from datetime import datetime
 import time
 import asyncio
-import math
 
 dashboard_bp = Blueprint('dashboard', __name__, template_folder='templates')
 
@@ -35,7 +34,9 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
                    get_positions_for_api, my_acc_id, gold_suffix, max_spread_pips,
                    daily_start_bal, cooldown, recent_sigs,
                    post_tp1_active, tp1_hit_tracking, tp_removed,
-                   get_connection_raw=None, equity_history=None, closed_trade_pnls=None):
+                   get_connection_raw=None, market_data=None, equity_history=None,
+                   closed_trade_pnls=None):
+    """Call this from main.py to connect the dashboard to the bot's state."""
     global _state_lock, _run_async, _fetch_account_balance, _get_current_spread
     global _get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS
     global daily_start_balance, cooldown_until, recent_signals
@@ -62,11 +63,10 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
 
 
 # ------------------------------------------------------------------
-# INDICATOR CALCULATIONS (mirroring Pine Script logic)
+# INDICATOR CALCULATIONS (mirroring Pine Script)
 # ------------------------------------------------------------------
 
 def ema(data, length):
-    """Exponential moving average"""
     if len(data) == 0:
         return []
     alpha = 2 / (length + 1)
@@ -76,7 +76,6 @@ def ema(data, length):
     return res
 
 def rsi(closes, period=14):
-    """Relative Strength Index"""
     if len(closes) <= period:
         return 50.0
     gains = []
@@ -93,7 +92,6 @@ def rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 def macd(closes):
-    """Returns (macd_line, signal_line, histogram)"""
     ema12 = ema(closes, 12)
     ema26 = ema(closes, 26)
     macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
@@ -101,7 +99,6 @@ def macd(closes):
     return macd_line, signal_line
 
 def adx(highs, lows, closes, period=14):
-    """Average Directional Index"""
     if len(highs) <= period:
         return 0.0
     tr_vals = []
@@ -118,12 +115,10 @@ def adx(highs, lows, closes, period=14):
     plus_di = (ema(plus_dm, period)[-1] / atr * 100) if atr > 0 else 0
     minus_di = (ema(minus_dm, period)[-1] / atr * 100) if atr > 0 else 0
     dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
-    # ADX is smoothed DX (using EMA of DX for period)
-    dx_list = [dx]  # simplified – in real ADX you'd need a full array
-    return ema(dx_list, period)[-1] if len(dx_list) >= period else dx
+    # Simplified ADX (just DX) – for more accuracy, smooth over period
+    return dx
 
 def vwap(candles):
-    """Volume Weighted Average Price from candles"""
     total_typical = 0.0
     total_volume = 0.0
     for c in candles:
@@ -146,14 +141,11 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
 
     conn = await _get_connection_raw(MY_ACC_ID)
 
-    # Fetch 100 candles – enough for all indicators
-    # Note: The correct method is get_candles (plural). If you still get attribute error,
-    # check your MetaApi SDK version. Alternatively, use:
-    # candles = await conn.get_candles(symbol, timeframe, 100)
+    # Try to use get_candles (plural) – if not available, fallback to get_candle loop
     try:
         candles = await conn.get_candles(symbol, timeframe, 100)
     except AttributeError:
-        # Fallback for older SDK: use get_candle in a loop (slow)
+        # Fallback for older SDK version
         candles = []
         end_time = datetime.utcnow()
         for _ in range(100):
@@ -170,7 +162,6 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     closes = [c['close'] for c in candles]
     highs = [c['high'] for c in candles]
     lows = [c['low'] for c in candles]
-    volumes = [c.get('volume', 1) for c in candles]
 
     # Basic EMAs
     ema9_vals = ema(closes, 9)
@@ -200,7 +191,7 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
         macd_bull,
         latest_ema9 > latest_ema21,
         adx_val > 25 and price > latest_ema9,
-        rsi_val > 50  # duplicate? Yes, Pine Script had it twice, we keep for exact match
+        rsi_val > 50  # duplicate – keeping for consistency with Pine
     ])
     r_score = sum([
         price < vwap_val,
@@ -210,8 +201,8 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
         adx_val > 25 and price < latest_ema9,
         rsi_val < 50
     ])
-    bull_pct = round(b_score / 6 * 100)
-    bear_pct = round(r_score / 6 * 100)
+    bull_pct = round(min(100, b_score / 6 * 100))
+    bear_pct = round(min(100, r_score / 6 * 100))
 
     diff = bull_pct - bear_pct
     if diff >= 40:
@@ -230,10 +221,8 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
     else:
         trend_strength = "WEAK"
 
-    # Simplified smart filter (can be extended)
-    # Here we mimic the Pine Script logic: if trend is weakening, allow reversals
-    # We'll set a placeholder; you can later implement full EMA slope detection
-    smart_filter = "OFF"  # For now, you can improve
+    # Smart filter placeholder (you can later implement full logic)
+    smart_filter = "OFF"
 
     result = {
         "bull_pct": bull_pct,
@@ -249,7 +238,7 @@ async def compute_market_state_for_tf(symbol, timeframe="5m"):
 
 
 # ------------------------------------------------------------------
-# API ENDPOINTS (same as before, but /api/market uses the compute function)
+# API ENDPOINTS
 # ------------------------------------------------------------------
 
 @dashboard_bp.route('/api/status')
@@ -348,7 +337,6 @@ def api_indicators():
             "hard_adx": "off", "vol_stat": "neutral", "trend_power": "neutral",
             "vwap": "neutral", "trend": "neutral"
         })
-    # Map computed values to indicator states
     bull = data.get("bull_pct", 0)
     bias = data.get("bias", "NEUTRAL")
     trend = data.get("trend", "WEAK")
