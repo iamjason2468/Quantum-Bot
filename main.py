@@ -450,7 +450,7 @@ async def get_trend_quality(connection, symbol):
     return clamp(er, 0.1, 1.0)
 
 # ------------------------------------------------------------------
-# POSITION MANAGER (now records closed trade P&L)
+# IMPROVED POSITION MANAGER (COMBINED SUGGESTIONS)
 # ------------------------------------------------------------------
 async def position_manager_loop(account_id):
     global breakeven_done_global, trail_updated_global, post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
@@ -502,7 +502,8 @@ async def position_manager_loop(account_id):
             for pos in positions:
                 symbol = pos['symbol']
                 exact_entry = pos['openPrice']
-                group_entry = round(exact_entry, 0) if 'XAU' in symbol.upper() else exact_entry
+                # Group by rounded entry (2 decimals for Gold)
+                group_entry = round(exact_entry, 2) if 'XAU' in symbol.upper() else exact_entry
                 key = f"{symbol}_{group_entry}"
                 active_trade_keys.add(key)
                 if key not in trade_groups:
@@ -541,7 +542,7 @@ async def position_manager_loop(account_id):
                 trail_start_mult = trail_start_base * scale
                 trail_dist_mult = trail_dist_base * scale
 
-                group_entry = round(entry, 0)
+                group_entry = round(entry, 2) if 'XAU' in symbol.upper() else entry
                 trade_key = f"{symbol}_{group_entry}"
 
                 if trade_key in post_tp1_active:
@@ -557,33 +558,43 @@ async def position_manager_loop(account_id):
                 atr = await get_symbol_atr(connection, symbol)
                 atr_pips = atr / PIP_VALUE
 
+                # --------------------------------------------------------------
+                # DYNAMIC BE BUFFER: minimum 5 pips (0.5) or 20% of ATR
+                # --------------------------------------------------------------
+                be_buffer_price = max(0.5, atr * 0.2)
+
+                # --- TP1 ZONE FORCE BREAKEVEN + TREND RIDER ACTIVATION ---
                 if GOLD_FORCE_BE_AT_TP1 and GOLD_REMOVE_TP_AFTER_TP1 and trade_key not in tp1_hit_tracking:
                     tp1_distance = abs(tp1_price - current_price)
                     tp1_threshold = abs(tp1_price - entry) * GOLD_TP1_BE_BUFFER_PCT
                     if tp1_distance <= tp1_threshold:
-                        logger.info(f"🪙 TP1 approaching! Removing TPs, forcing BE, and activating immediate trailing")
+                        logger.info(f"🎯 TP1 Zone Reached. Switching to Aggressive Trend Rider Mode.")
                         for group_pos in trade_groups.get(trade_key, []):
-                            if group_pos['id'] not in tp_removed and group_pos.get('takeProfit', 0) != tp1_price:
+                            # Remove TPs for TP2, TP3, TP4 to let them run
+                            if group_pos.get('takeProfit', 0) != tp1_price:
                                 try:
                                     await connection.update_position(group_pos['id'], {'takeProfit': 0})
                                     logger.info(f"🔓 Removed TP from position {group_pos['id']} — trail only now")
                                     tp_removed.add(group_pos['id'])
                                 except Exception as e:
                                     logger.warning(f"Could not remove TP: {e}")
+
+                            # Move SL to BE + Dynamic Buffer
                             if group_pos['id'] not in breakeven_done:
-                                buffer = 3 * PIP_VALUE
                                 if pos_type == 'POSITION_TYPE_BUY':
-                                    new_sl = entry + buffer
+                                    new_be_sl = entry + be_buffer_price
                                 else:
-                                    new_sl = entry - buffer
-                                if (pos_type == 'POSITION_TYPE_BUY' and new_sl > group_pos.get('stopLoss', 0)) or \
-                                   (pos_type == 'POSITION_TYPE_SELL' and new_sl < group_pos.get('stopLoss', 0)):
-                                    await connection.update_position(group_pos['id'], {'stopLoss': new_sl})
-                                    logger.info(f"🎯 Force BE: Moved SL of {group_pos['id']} to {new_sl}")
+                                    new_be_sl = entry - be_buffer_price
+                                if (pos_type == 'POSITION_TYPE_BUY' and new_be_sl > group_pos.get('stopLoss', 0)) or \
+                                   (pos_type == 'POSITION_TYPE_SELL' and new_be_sl < group_pos.get('stopLoss', 0)):
+                                    await connection.update_position(group_pos['id'], {'stopLoss': new_be_sl})
+                                    logger.info(f"🎯 Force BE: Moved SL of {group_pos['id']} to {new_be_sl}")
                                     breakeven_done.add(group_pos['id'])
+
                         tp1_hit_tracking.add(trade_key)
                         post_tp1_active.add(trade_key)
 
+                # --- STANDARD BREAKEVEN (if not done yet) ---
                 if position_id not in breakeven_done:
                     sl_distance_pips = abs(entry - current_sl) / PIP_VALUE if current_sl else float('inf')
                     be_trigger_pips = min(
@@ -591,19 +602,29 @@ async def position_manager_loop(account_id):
                         sl_distance_pips * 0.7
                     )
                     if profit_pips >= be_trigger_pips:
-                        buffer = 3 * PIP_VALUE
+                        # Use dynamic buffer here as well
                         if pos_type == 'POSITION_TYPE_BUY':
-                            new_sl = entry + buffer
+                            new_sl = entry + be_buffer_price
                         else:
-                            new_sl = entry - buffer
+                            new_sl = entry - be_buffer_price
                         if (pos_type == 'POSITION_TYPE_BUY' and new_sl > current_sl) or \
                            (pos_type == 'POSITION_TYPE_SELL' and new_sl < current_sl):
                             await connection.update_position(position_id, {'stopLoss': new_sl})
                             logger.info(f"🎯 Breakeven: Moved SL of {position_id} to {new_sl} (profit: {profit_pips:.1f} pips)")
                             breakeven_done.add(position_id)
 
+                # --- TRAILING STOP (with instant trail and overextension filter) ---
                 trail_start_pips = atr_pips * trail_start_mult
                 trail_distance_pips = atr_pips * trail_dist_mult
+
+                # Instant trailing if post TP1 active
+                if trade_key in post_tp1_active:
+                    trail_start_pips = 0.0
+
+                # Overextension filter: tighten trail if ER > 0.8
+                if quality > 0.8:
+                    trail_distance_pips *= 0.8
+
                 if profit_pips >= trail_start_pips:
                     trail_distance_price = trail_distance_pips * PIP_VALUE
                     if pos_type == 'POSITION_TYPE_BUY':
