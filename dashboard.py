@@ -2,11 +2,10 @@
 from flask import Blueprint, jsonify, render_template, request
 from datetime import datetime
 import time
+import asyncio
 
-# Create the blueprint
 dashboard_bp = Blueprint('dashboard', __name__, template_folder='templates')
 
-# These will be set when init_dashboard() is called from main.py
 _state_lock = None
 _run_async = None
 _fetch_account_balance = None
@@ -22,23 +21,24 @@ post_tp1_active_global = None
 tp1_hit_tracking_global = None
 tp_removed_global = None
 _get_connection_raw = None
-_market_data = None          # live market state from TradingView webhook
-_equity_history = None       # deque of balance snapshots
-_closed_trade_pnls = None    # deque of closed trade P&L values
+_equity_history = None
+_closed_trade_pnls = None
+
+# Cache for computed market states per timeframe
+_market_cache = {}
+_market_cache_ttl = 60
 
 
 def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spread,
                    get_positions_for_api, my_acc_id, gold_suffix, max_spread_pips,
                    daily_start_bal, cooldown, recent_sigs,
                    post_tp1_active, tp1_hit_tracking, tp_removed,
-                   get_connection_raw=None, market_data=None, equity_history=None,
-                   closed_trade_pnls=None):
-    """Call this from main.py to connect the dashboard to the bot's state."""
+                   get_connection_raw=None, equity_history=None, closed_trade_pnls=None):
     global _state_lock, _run_async, _fetch_account_balance, _get_current_spread
     global _get_positions_for_api, MY_ACC_ID, GOLD_SUFFIX, MAX_SPREAD_PIPS
     global daily_start_balance, cooldown_until, recent_signals
     global post_tp1_active_global, tp1_hit_tracking_global, tp_removed_global
-    global _get_connection_raw, _market_data, _equity_history, _closed_trade_pnls
+    global _get_connection_raw, _equity_history, _closed_trade_pnls
 
     _state_lock = state_lock
     _run_async = run_async
@@ -55,9 +55,125 @@ def init_dashboard(state_lock, run_async, fetch_account_balance, get_current_spr
     tp1_hit_tracking_global = tp1_hit_tracking
     tp_removed_global = tp_removed
     _get_connection_raw = get_connection_raw
-    _market_data = market_data
     _equity_history = equity_history
     _closed_trade_pnls = closed_trade_pnls
+
+
+async def compute_market_state_for_tf(symbol, timeframe="5m"):
+    """Fetch candles from MetaApi and compute bull/bear %, bias, ADX, etc."""
+    cache_key = f"{symbol}_{timeframe}"
+    now = time.time()
+    if cache_key in _market_cache and (now - _market_cache[cache_key].get("ts", 0)) < _market_cache_ttl:
+        return _market_cache[cache_key]["data"]
+
+    if _get_connection_raw is None:
+        return None
+
+    conn = await _get_connection_raw(MY_ACC_ID)
+    candles = await conn.get_candles(symbol, timeframe, 100)
+    if not candles or len(candles) < 50:
+        return None
+
+    closes = [c['close'] for c in candles]
+    highs = [c['high'] for c in candles]
+    lows = [c['low'] for c in candles]
+    volumes = [c.get('volume', 1) for c in candles]
+
+    def ema(data, length):
+        alpha = 2 / (length + 1)
+        res = [data[0]]
+        for x in data[1:]:
+            res.append(alpha * x + (1 - alpha) * res[-1])
+        return res
+
+    ema9_vals = ema(closes, 9)
+    ema21_vals = ema(closes, 21)
+    latest_ema9 = ema9_vals[-1]
+    latest_ema21 = ema21_vals[-1]
+    ema_cross = "BULL" if latest_ema9 > latest_ema21 else "BEAR"
+
+    typical = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+    vwap = sum(t * v for t, v in zip(typical, volumes)) / sum(volumes) if sum(volumes) > 0 else closes[-1]
+    price = closes[-1]
+
+    gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+    avg_gain = sum(gains[:14]) / 14
+    avg_loss = sum(losses[:14]) / 14
+    rsi_val = 100 - (100 / (1 + avg_gain / avg_loss)) if avg_loss != 0 else 100
+
+    ema12 = ema(closes, 12)
+    ema26 = ema(closes, 26)
+    macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
+    signal_line = ema(macd_line, 9)
+    macd_bull = macd_line[-1] > signal_line[-1]
+
+    tr_vals = []
+    plus_dm = []
+    minus_dm = []
+    for i in range(1, len(highs)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_vals.append(tr)
+        up = highs[i] - highs[i-1]
+        down = lows[i-1] - lows[i]
+        plus_dm.append(up if up > down and up > 0 else 0)
+        minus_dm.append(down if down > up and down > 0 else 0)
+    atr_val = ema(tr_vals, 14)[-1] if len(tr_vals) >= 14 else 1
+    plus_di = (ema(plus_dm, 14)[-1] / atr_val * 100) if atr_val > 0 else 0
+    minus_di = (ema(minus_dm, 14)[-1] / atr_val * 100) if atr_val > 0 else 0
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
+    adx_val = dx
+
+    # Simplified bias scores
+    b_score = sum([
+        price > vwap,
+        rsi_val > 50,
+        macd_bull,
+        latest_ema9 > latest_ema21,
+        adx_val > 25 and price > latest_ema9,
+        rsi_val > 50
+    ])
+    r_score = sum([
+        price < vwap,
+        rsi_val < 50,
+        not macd_bull,
+        latest_ema9 < latest_ema21,
+        adx_val > 25 and price < latest_ema9,
+        rsi_val < 50
+    ])
+    bull_pct = round(b_score / 6 * 100)
+    bear_pct = round(r_score / 6 * 100)
+
+    diff = bull_pct - bear_pct
+    if diff >= 40:
+        bias_text = "STRONG BULL"
+    elif diff <= -40:
+        bias_text = "STRONG BEAR"
+    elif diff > 0:
+        bias_text = "MILD BULL"
+    else:
+        bias_text = "MILD BEAR"
+
+    if adx_val > 30:
+        trend_strength = "STRONG"
+    elif adx_val > 22:
+        trend_strength = "MODERATE"
+    else:
+        trend_strength = "WEAK"
+
+    smart_filter = "OFF"  # you can implement your logic or leave as is
+
+    result = {
+        "bull_pct": bull_pct,
+        "bear_pct": bear_pct,
+        "adx": round(adx_val, 1),
+        "bias": bias_text,
+        "smart_filter": smart_filter,
+        "trend": trend_strength,
+        "status": "LIVE"
+    }
+    _market_cache[cache_key] = {"data": result, "ts": now}
+    return result
 
 
 # ------------------------------------------------------------------
@@ -138,9 +254,11 @@ def api_manager():
 
 @dashboard_bp.route('/api/market')
 def api_market():
-    # Return live market state from TradingView webhook
-    if _market_data is not None and _market_data.get("status") != "WAITING":
-        return jsonify(_market_data)
+    timeframe = request.args.get('tf', '5m')
+    symbol = "XAUUSD" + GOLD_SUFFIX
+    data = _run_async(compute_market_state_for_tf(symbol, timeframe))
+    if data:
+        return jsonify(data)
     return jsonify({
         "bull_pct": 0, "bear_pct": 0, "adx": 0,
         "bias": "NO DATA", "smart_filter": "OFF",
@@ -150,24 +268,23 @@ def api_market():
 
 @dashboard_bp.route('/api/indicators')
 def api_indicators():
-    if _market_data is None or _market_data.get("status") == "WAITING":
+    symbol = "XAUUSD" + GOLD_SUFFIX
+    data = _run_async(compute_market_state_for_tf(symbol, "5m"))
+    if not data:
         return jsonify({
             "ema": "neutral", "macd": "neutral", "adx_power": "neutral",
             "hard_adx": "off", "vol_stat": "neutral", "trend_power": "neutral",
             "vwap": "neutral", "trend": "neutral"
         })
-    bull = _market_data.get("bull_pct", 0)
-    bias = _market_data.get("bias", "NEUTRAL")
-    trend = _market_data.get("trend", "WEAK")
     return jsonify({
-        "ema": "bull" if bull > 50 else "bear",
-        "macd": "bull" if bull > 50 else "bear",
-        "adx_power": "strong" if _market_data.get("adx", 0) > 25 else "moderate",
+        "ema": "bull" if data.get("bull_pct", 0) > 50 else "bear",
+        "macd": "bull" if data.get("bull_pct", 0) > 50 else "bear",
+        "adx_power": "strong" if data.get("adx", 0) > 25 else "moderate",
         "hard_adx": "off",
-        "vol_stat": "high" if bull > 50 else "low",
-        "trend_power": trend.lower(),
-        "vwap": "bull" if bull > 50 else "bear",
-        "trend": "bull" if "BULL" in bias.upper() else "bear"
+        "vol_stat": "high" if data.get("bull_pct", 0) > 50 else "low",
+        "trend_power": data.get("trend", "WEAK").lower(),
+        "vwap": "bull" if data.get("bull_pct", 0) > 50 else "bear",
+        "trend": "bull" if "BULL" in data.get("bias", "").upper() else "bear"
     })
 
 
