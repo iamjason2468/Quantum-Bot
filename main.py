@@ -407,6 +407,21 @@ def extract_position_id(result, tp_label, vol):
     return {"tp": tp_label, "volume": vol, "positionId": pos_id}
 
 # ------------------------------------------------------------------
+# BACKGROUND TRADE EXECUTION (prevents webhook timeout)
+# ------------------------------------------------------------------
+def process_trade_async(target_id, action, final_symbol, volume, entry, sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive):
+    try:
+        result = run_async(
+            place_single_trade(
+                target_id, action, final_symbol, volume, entry,
+                sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive
+            )
+        )
+        logger.info(f"Trade result: {result}")
+    except Exception as e:
+        logger.error(f"Async trade failed: {e}")
+
+# ------------------------------------------------------------------
 # ATR CACHE
 # ------------------------------------------------------------------
 atr_cache = {}
@@ -907,28 +922,22 @@ def webhook():
         if include_tp4:
             logger.info(f"🪙 Trend Rider runner included")
 
-        result = run_async(
-            place_single_trade(
-                target_id, action, final_symbol, volume, entry,
-                sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive
-            )
-        )
+        # Fire and forget trade execution in a background thread to avoid blocking the webhook
+        threading.Thread(
+            target=process_trade_async,
+            args=(target_id, action, final_symbol, volume, entry, sl, tp1, tp2, tp3, tp4, include_tp4, be_buffer, use_adaptive),
+            daemon=True
+        ).start()
 
-        if "error" in result:
-            signal_record["status"] = "ERROR"
-            signal_record["reason"] = result.get("error", "unknown")
-        else:
-            signal_record["status"] = "EXECUTED"
-
+        signal_record["status"] = "PROCESSING"
         with state_lock:
             recent_signals.append(signal_record)
 
         return jsonify({
-            "status": "success",
+            "status": "processing",
             "target_account": user,
             "symbol": final_symbol,
-            "action": action,
-            "result": result
+            "action": action
         }), 200
 
     except Exception as e:
